@@ -14,6 +14,7 @@ from services.nlp_service import (
     calculate_hybrid_match_score,
     evaluate_bias,
     extract_candidate_info,
+    test_ollama_generation,
 )
 
 # Reuses your existing SQLAlchemy models and schemas.
@@ -30,6 +31,12 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 @app.get("/health/")
 def health_check():
     return {"status": "ok", "message": "API is running. Ollama is checked when NLP processing is requested."}
+
+
+@app.get("/diagnostics/ollama-generation/")
+def ollama_generation_diagnostic():
+    """Run a small local-model test and report how long generation takes."""
+    return test_ollama_generation(timeout_seconds=120.0)
 
 
 @app.post("/jobs/", response_model=schemas.JobResponse)

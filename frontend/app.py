@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import requests
@@ -182,7 +184,10 @@ else:
     st.write(
         "Choose a job posting, upload a PDF resume, and run the compatibility "
         "analysis. Processing may take several minutes the first time while the "
-        "local models are loading."
+        "local models are loading. Before uploading, you can test generation at "
+        "`http://127.0.0.1:8000/diagnostics/ollama-generation/`. "
+        "During processing, the timer below shows elapsed time; the backend terminal "
+        "shows which NLP stage is running."
     )
 
     jobs = fetch_jobs()
@@ -209,16 +214,63 @@ else:
                 "application/pdf",
             )
         }
-        with st.spinner(
-            "Processing the resume. The backend is extracting information, "
-            "matching evidence to job requirements, and generating the report..."
-        ):
-            response = api_request(
-                "POST",
-                f"/jobs/{selected_job_id}/upload-cv/",
-                files=files,
-                timeout=PROCESSING_TIMEOUT,
+        response = None
+        started = time.perf_counter()
+        with st.status(
+            "Starting resume analysis...",
+            expanded=True,
+        ) as processing_status:
+            st.write(
+                "The browser waits for the backend to finish. Watch the backend "
+                "terminal for detailed model timings. The first run may also "
+                "download and initialize the embedding model."
             )
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    requests.post,
+                    f"{API_URL}/jobs/{selected_job_id}/upload-cv/",
+                    files=files,
+                    timeout=PROCESSING_TIMEOUT,
+                )
+                while not future.done():
+                    elapsed = int(time.perf_counter() - started)
+                    processing_status.update(
+                        label=(
+                            f"Processing resume — {elapsed} seconds elapsed. "
+                            "See the backend terminal for the current stage."
+                        ),
+                        state="running",
+                        expanded=True,
+                    )
+                    time.sleep(1)
+
+                try:
+                    response = future.result()
+                    elapsed = round(time.perf_counter() - started, 1)
+                    processing_status.update(
+                        label=f"Backend response received after {elapsed} seconds.",
+                        state="complete" if response.ok else "error",
+                        expanded=True,
+                    )
+                except requests.exceptions.Timeout:
+                    elapsed = round(time.perf_counter() - started, 1)
+                    processing_status.update(
+                        label=f"Request timed out after {elapsed} seconds.",
+                        state="error",
+                        expanded=True,
+                    )
+                    st.error(
+                        "The frontend timed out while waiting for the backend. "
+                        "Check the backend terminal: an Ollama task may still be running "
+                        "or may have failed. Try the Ollama diagnostic URL shown above."
+                    )
+                except requests.exceptions.RequestException as exc:
+                    processing_status.update(
+                        label="Could not reach the backend.",
+                        state="error",
+                        expanded=True,
+                    )
+                    st.error(f"Resume-processing request failed: {exc}")
 
         if response is not None:
             if response.ok:

@@ -43,7 +43,7 @@ if menu == "Manage Jobs":
 
 elif menu == "Upload CV & Candidate Leaderboard":
     st.header("📂 Candidate CV Upload & Compatibility Analysis")
-    st.write("Select an active job position below, upload a candidate's PDF CV, and the system will automatically parse it, calculate the semantic match score, and evaluate potential bias.")
+    st.write("Select an active job position below, upload a candidate's PDF CV, and the system will automatically parse it, calculate the hybrid match score, and evaluate potential bias.")
     
     res = requests.get(f"{API_URL}/jobs/")
     if res.status_code == 200:
@@ -60,17 +60,24 @@ elif menu == "Upload CV & Candidate Leaderboard":
             
             if uploaded_file is not None:
                 if st.button("Process CV & Evaluate Compatibility"):
-                    with st.spinner("Extracting text, computing semantic embeddings, and generating bias report..."):
+                    with st.spinner("Extracting text, computing hybrid score, and generating bias report..."):
                         files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
                         r = requests.post(f"{API_URL}/jobs/{job_id}/upload-cv/", files=files)
                         
                         if r.status_code == 200:
-                            data = r.json()
+                            data = r.json()  # Aici definim varianta 'data' corect
                             st.success(f"CV for **{data['full_name']}** processed successfully!")
                             
                             col1, col2 = st.columns(2)
                             with col1:
-                                st.metric(label="Match Score (Compatibility)", value=f"{data['match_score']}%")
+                                st.metric(label="Hybrid Match Score", value=f"{data['match_score']}%")
+                                st.write("**Match Explanation:**")
+                                match_details = data['bias_report'].get("match_details", {})
+                                st.write(match_details.get("explanation", ""))
+                                if match_details.get("matched_skills"):
+                                    st.write(f"✅ **Matched Skills:** {', '.join(match_details.get('matched_skills', []))}")
+                                if match_details.get("missing_skills"):
+                                    st.write(f"❌ **Missing Skills:** {', '.join(match_details.get('missing_skills', []))}")
                             with col2:
                                 st.write("**Detected Bias Summary:**")
                                 st.json(data['bias_report'])
@@ -79,7 +86,7 @@ elif menu == "Upload CV & Candidate Leaderboard":
             
             st.divider()
             st.subheader("🏆 Dynamic Leaderboard & Fairness Report")
-            st.write("Candidates are automatically ranked in real-time based on their semantic compatibility score.")
+            st.write("Candidates are automatically ranked in real-time based on their hybrid compatibility score.")
             
             lb_res = requests.get(f"{API_URL}/jobs/{job_id}/leaderboard/")
             if lb_res.status_code == 200:
@@ -93,6 +100,10 @@ elif menu == "Upload CV & Candidate Leaderboard":
                                 st.write(f"**Email:** {cand['email']}")
                                 st.write(f"**Phone:** {cand['phone']}")
                                 st.write(f"**Submitted At:** {cand['submitted_at']}")
+                                match_det = cand['bias_report'].get("match_details", {})
+                                if match_det:
+                                    st.write(f"**Matched Skills:** {', '.join(match_det.get('matched_skills', []))}")
+                                    st.write(f"**Missing Skills:** {', '.join(match_det.get('missing_skills', []))}")
                             with col_b:
                                 st.write("**Algorithmic Bias Evaluation:**")
                                 st.json(cand['bias_report'])

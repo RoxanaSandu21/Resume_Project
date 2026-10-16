@@ -1,10 +1,12 @@
 fastapi
-uvicorn
+uvicorn[standard]
 sqlalchemy
 psycopg2-binary
-pydantic
-python-dotenv
-streamlit
-PyMuPDF
+python-multipart
+pymupdf
 sentence-transformers
+ollama
+streamlit
 requests
+numpy
+pydantic

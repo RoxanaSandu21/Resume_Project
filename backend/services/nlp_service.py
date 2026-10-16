@@ -462,14 +462,14 @@ def _chunk_raw_resume_text(text: str, max_chars: int = 420) -> list[str]:
         for piece in pieces:
             extra_length = len(piece) + (1 if current_lines else 0)
             if current_lines and current_length + extra_length > max_chars:
-                chunks.append("\\n".join(current_lines))
+                chunks.append("\n".join(current_lines))
                 current_lines = []
                 current_length = 0
             current_lines.append(piece)
             current_length += len(piece) + (1 if len(current_lines) > 1 else 0)
 
     if current_lines:
-        chunks.append("\\n".join(current_lines))
+        chunks.append("\n".join(current_lines))
     return chunks
 
 

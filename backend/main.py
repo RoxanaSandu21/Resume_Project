@@ -1,3 +1,4 @@
+import logging
 import os
 import uuid
 
@@ -19,6 +20,7 @@ from services.nlp_service import (
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Resume-Job Compatibility Scoring and Bias Evaluation API", version="2.0")
+logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = "uploaded_cvs"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
@@ -68,29 +70,39 @@ def upload_cv(job_id: int, file: UploadFile = File(...), db: Session = Depends(g
     with open(file_path, "wb") as output_file:
         output_file.write(content)
 
+    logger.info("Started resume processing for job_id=%s", job_id)
     try:
+        logger.info("Extracting text from PDF for job_id=%s", job_id)
         cv_text = extract_text_from_pdf(file_path)
+        logger.info("Extracted %s characters for job_id=%s", len(cv_text), job_id)
+        logger.info("Extracting structured resume information for job_id=%s", job_id)
         cv_data = extract_cv_information(cv_text)
         candidate_info = extract_candidate_info(cv_text, cv_info=cv_data)
+        logger.info("Scoring resume against job requirements for job_id=%s", job_id)
         match_result = calculate_hybrid_match_score(
             job.description,
             cv_text,
             job_title=job.title,
             cv_data=cv_data,
         )
+        logger.info("Generating text-based bias screening for job_id=%s", job_id)
         bias_report = evaluate_bias(cv_text)
+        logger.info("Finished resume scoring for job_id=%s with score=%.2f", job_id, match_result["score"])
     except ValueError as exc:
+        logger.warning("Resume validation failed for job_id=%s: %s", job_id, exc)
         if os.path.exists(file_path):
             os.remove(file_path)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
+        logger.error("NLP service error for job_id=%s (%s)", job_id, type(exc).__name__)
         if os.path.exists(file_path):
             os.remove(file_path)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
+        logger.error("Unexpected resume processing error for job_id=%s (%s)", job_id, type(exc).__name__)
         if os.path.exists(file_path):
             os.remove(file_path)
-        raise HTTPException(status_code=500, detail=f"CV processing failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail=f"Resume processing failed ({type(exc).__name__}). Check the backend terminal for details.") from exc
 
     bias_report["match_details"] = {
         "explanation": match_result["explanation"],

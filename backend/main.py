@@ -1,4 +1,7 @@
+import logging
 import os
+import re
+import time
 import uuid
 
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
@@ -13,21 +16,62 @@ from services.nlp_service import (
     calculate_hybrid_match_score,
     evaluate_bias,
     extract_candidate_info,
+    test_ollama_generation,
 )
 
 # Reuses your existing SQLAlchemy models and schemas.
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Resume-Job Compatibility Scoring and Bias Evaluation API", version="2.0")
+logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = "uploaded_cvs"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
+@app.middleware("http")
+async def trace_resume_upload_requests(request, call_next):
+    """Print request start/end before and after FastAPI parses/processes a resume upload."""
+    is_upload = (
+        request.method == "POST"
+        and re.fullmatch(r"/jobs/\d+/upload-cv/", request.url.path) is not None
+    )
+    if not is_upload:
+        return await call_next(request)
+
+    started = time.perf_counter()
+    print(
+        f"[UPLOAD TRACE] Request received: {request.method} {request.url.path}",
+        flush=True,
+    )
+    try:
+        response = await call_next(request)
+        elapsed = time.perf_counter() - started
+        print(
+            f"[UPLOAD TRACE] Response completed: HTTP {response.status_code} "
+            f"after {elapsed:.1f} seconds",
+            flush=True,
+        )
+        return response
+    except Exception as exc:
+        elapsed = time.perf_counter() - started
+        print(
+            f"[UPLOAD TRACE] Request raised {type(exc).__name__} after {elapsed:.1f} seconds: {exc}",
+            flush=True,
+        )
+        raise
+
+
 @app.get("/health/")
 def health_check():
     return {"status": "ok", "message": "API is running. Ollama is checked when NLP processing is requested."}
+
+
+@app.get("/diagnostics/ollama-generation/")
+def ollama_generation_diagnostic():
+    """Run a small local-model test and report how long generation takes."""
+    return test_ollama_generation(timeout_seconds=120.0)
 
 
 @app.post("/jobs/", response_model=schemas.JobResponse)
@@ -49,6 +93,7 @@ def get_jobs(db: Session = Depends(get_db)):
 
 @app.post("/jobs/{job_id}/upload-cv/")
 def upload_cv(job_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    print(f"[UPLOAD TRACE] Handler entered for job_id={job_id}; filename={file.filename!r}", flush=True)
     job = db.query(models.Job).filter(models.Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -57,6 +102,7 @@ def upload_cv(job_id: int, file: UploadFile = File(...), db: Session = Depends(g
     if not original_filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=415, detail="Only PDF CV files are accepted.")
 
+    print(f"[UPLOAD TRACE] Job lookup completed for job_id={job_id}; reading uploaded file.", flush=True)
     content = file.file.read(MAX_UPLOAD_BYTES + 1)
     if not content:
         raise HTTPException(status_code=400, detail="The uploaded file is empty.")
@@ -68,29 +114,45 @@ def upload_cv(job_id: int, file: UploadFile = File(...), db: Session = Depends(g
     with open(file_path, "wb") as output_file:
         output_file.write(content)
 
+    print(f"[UPLOAD TRACE] PDF saved ({len(content)} bytes). Starting text extraction.", flush=True)
+    logger.info("Started resume processing for job_id=%s", job_id)
     try:
+        print("[UPLOAD TRACE] Stage 1/5: Extracting PDF text.", flush=True)
+        logger.info("Extracting text from PDF for job_id=%s", job_id)
         cv_text = extract_text_from_pdf(file_path)
+        logger.info("Extracted %s characters for job_id=%s", len(cv_text), job_id)
+        print("[UPLOAD TRACE] Stage 2/5: Extracting structured resume information with Ollama.", flush=True)
+        logger.info("Extracting structured resume information for job_id=%s", job_id)
         cv_data = extract_cv_information(cv_text)
         candidate_info = extract_candidate_info(cv_text, cv_info=cv_data)
+        print("[UPLOAD TRACE] Stage 3/5: Extracting job requirements and comparing evidence.", flush=True)
+        logger.info("Scoring resume against job requirements for job_id=%s", job_id)
         match_result = calculate_hybrid_match_score(
             job.description,
             cv_text,
             job_title=job.title,
             cv_data=cv_data,
         )
+        print("[UPLOAD TRACE] Stage 4/5: Running text-based bias screening.", flush=True)
+        logger.info("Generating text-based bias screening for job_id=%s", job_id)
         bias_report = evaluate_bias(cv_text)
+        print(f"[UPLOAD TRACE] Stage 5/5: NLP complete. Score={match_result['score']}. Saving to database.", flush=True)
+        logger.info("Finished resume scoring for job_id=%s with score=%.2f", job_id, match_result["score"])
     except ValueError as exc:
+        logger.warning("Resume validation failed for job_id=%s: %s", job_id, exc)
         if os.path.exists(file_path):
             os.remove(file_path)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
+        logger.error("NLP service error for job_id=%s (%s)", job_id, type(exc).__name__)
         if os.path.exists(file_path):
             os.remove(file_path)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
+        logger.error("Unexpected resume processing error for job_id=%s (%s)", job_id, type(exc).__name__)
         if os.path.exists(file_path):
             os.remove(file_path)
-        raise HTTPException(status_code=500, detail=f"CV processing failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail=f"Resume processing failed ({type(exc).__name__}). Check the backend terminal for details.") from exc
 
     bias_report["match_details"] = {
         "explanation": match_result["explanation"],

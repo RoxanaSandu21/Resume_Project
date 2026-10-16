@@ -130,15 +130,18 @@ def _get_embedding_model() -> SentenceTransformer:
     global _embedding_model
     if _embedding_model is None:
         started = time.perf_counter()
+        print(f"[NLP] Loading embedding model '{EMBEDDING_MODEL}'. The first download/load can take a while.", flush=True)
         logger.info("[NLP] Loading embedding model '%s'. The first download/load can take a while.", EMBEDDING_MODEL)
         try:
             _embedding_model = SentenceTransformer(EMBEDDING_MODEL)
         except Exception:
             logger.exception("[NLP] Failed to load embedding model '%s'.", EMBEDDING_MODEL)
             raise
+        elapsed = time.perf_counter() - started
+        print(f"[NLP] Embedding model loaded in {elapsed:.1f} seconds.", flush=True)
         logger.info(
             "[NLP] Embedding model loaded in %.1f seconds.",
-            time.perf_counter() - started,
+            elapsed,
         )
     return _embedding_model
 
@@ -166,6 +169,11 @@ def _quote_is_in_source(quote: str, source: str) -> bool:
 def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: str) -> BaseModel:
     """Call Ollama, log duration, and validate the structured JSON response."""
     started = time.perf_counter()
+    print(
+        f"[NLP] Starting Ollama task '{schema.__name__}' using model "
+        f"'{OLLAMA_MODEL}' (input: {len(user_prompt)} characters).",
+        flush=True,
+    )
     logger.info(
         "[NLP] Starting Ollama task '%s' using model '%s' (input: %s characters).",
         schema.__name__,
@@ -183,17 +191,21 @@ def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: st
             options={"temperature": 0},
         )
         parsed = schema.model_validate_json(response.message.content)
+        elapsed = time.perf_counter() - started
+        print(f"[NLP] Finished Ollama task '{schema.__name__}' in {elapsed:.1f} seconds.", flush=True)
         logger.info(
             "[NLP] Finished Ollama task '%s' in %.1f seconds.",
             schema.__name__,
-            time.perf_counter() - started,
+            elapsed,
         )
         return parsed
     except Exception as exc:
+        elapsed = time.perf_counter() - started
+        print(f"[NLP] FAILED Ollama task '{schema.__name__}' after {elapsed:.1f} seconds: {type(exc).__name__}: {exc}", flush=True)
         logger.exception(
             "[NLP] Ollama task '%s' failed after %.1f seconds.",
             schema.__name__,
-            time.perf_counter() - started,
+            elapsed,
         )
         raise RuntimeError(
             "Could not use the local Ollama model. Check that Ollama is installed and running, "

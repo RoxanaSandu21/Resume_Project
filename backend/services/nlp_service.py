@@ -12,8 +12,10 @@ the LLM judges those evidence/requirement pairs. Final aggregation is determinis
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import re
+import time
 from functools import lru_cache
 from typing import Literal
 
@@ -44,6 +46,7 @@ PRIORITY_WEIGHTS = {
 RETRIEVAL_MIN_SIMILARITY = 0.25
 
 _embedding_model: SentenceTransformer | None = None
+logger = logging.getLogger(__name__)
 
 
 # ---------- Structured output schemas for Ollama ----------
@@ -123,9 +126,20 @@ class MatchAssessmentOutput(BaseModel):
 
 
 def _get_embedding_model() -> SentenceTransformer:
+    """Load and cache the embedding model, logging the initial load duration."""
     global _embedding_model
     if _embedding_model is None:
-        _embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+        started = time.perf_counter()
+        logger.info("[NLP] Loading embedding model '%s'. The first download/load can take a while.", EMBEDDING_MODEL)
+        try:
+            _embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+        except Exception:
+            logger.exception("[NLP] Failed to load embedding model '%s'.", EMBEDDING_MODEL)
+            raise
+        logger.info(
+            "[NLP] Embedding model loaded in %.1f seconds.",
+            time.perf_counter() - started,
+        )
     return _embedding_model
 
 
@@ -150,7 +164,14 @@ def _quote_is_in_source(quote: str, source: str) -> bool:
 
 
 def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: str) -> BaseModel:
-    """Call Ollama and validate the structured JSON response with Pydantic."""
+    """Call Ollama, log duration, and validate the structured JSON response."""
+    started = time.perf_counter()
+    logger.info(
+        "[NLP] Starting Ollama task '%s' using model '%s' (input: %s characters).",
+        schema.__name__,
+        OLLAMA_MODEL,
+        len(user_prompt),
+    )
     try:
         response = _ollama_client.chat(
             model=OLLAMA_MODEL,
@@ -161,8 +182,19 @@ def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: st
             format=schema.model_json_schema(),
             options={"temperature": 0},
         )
-        return schema.model_validate_json(response.message.content)
+        parsed = schema.model_validate_json(response.message.content)
+        logger.info(
+            "[NLP] Finished Ollama task '%s' in %.1f seconds.",
+            schema.__name__,
+            time.perf_counter() - started,
+        )
+        return parsed
     except Exception as exc:
+        logger.exception(
+            "[NLP] Ollama task '%s' failed after %.1f seconds.",
+            schema.__name__,
+            time.perf_counter() - started,
+        )
         raise RuntimeError(
             "Could not use the local Ollama model. Check that Ollama is installed and running, "
             f"and that the model '{OLLAMA_MODEL}' has been downloaded. Technical details: {exc}"

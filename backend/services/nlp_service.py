@@ -19,11 +19,13 @@ from typing import Literal
 
 import fitz  # PyMuPDF
 import numpy as np
-from ollama import chat
-from pydantic import BaseModel, Field, ValidationError
+from ollama import Client
+from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "900"))
+_ollama_client = Client(timeout=OLLAMA_TIMEOUT_SECONDS)
 EMBEDDING_MODEL = os.getenv(
     "EMBEDDING_MODEL",
     "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
@@ -150,7 +152,7 @@ def _quote_is_in_source(quote: str, source: str) -> bool:
 def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: str) -> BaseModel:
     """Call Ollama and validate the structured JSON response with Pydantic."""
     try:
-        response = chat(
+        response = _ollama_client.chat(
             model=OLLAMA_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -162,8 +164,8 @@ def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: st
         return schema.model_validate_json(response.message.content)
     except Exception as exc:
         raise RuntimeError(
-            "Nu am putut folosi modelul local Ollama. Verifică dacă aplicația Ollama rulează "
-            f"și dacă ai descărcat modelul '{OLLAMA_MODEL}'. Detaliu tehnic: {exc}"
+            "Could not use the local Ollama model. Check that Ollama is installed and running, "
+            f"and that the model '{OLLAMA_MODEL}' has been downloaded. Technical details: {exc}"
         ) from exc
 
 
@@ -176,19 +178,19 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         chunks: list[str] = []
         with fitz.open(pdf_path) as document:
             if document.is_encrypted:
-                raise ValueError("PDF-ul este protejat cu parolă și nu poate fi citit.")
+                raise ValueError("The PDF is password-protected and cannot be read.")
             for page in document:
                 chunks.append(page.get_text("text", sort=True))
     except ValueError:
         raise
     except Exception as exc:
-        raise ValueError(f"PDF-ul nu a putut fi citit: {exc}") from exc
+        raise ValueError(f"The PDF could not be read: {exc}") from exc
 
     text = _compact_text("\n".join(chunks))
     if not text:
         raise ValueError(
-            "PDF-ul nu conține text selectabil. Dacă este un CV scanat/fotografiat, "
-            "trebuie adăugat OCR (de exemplu Tesseract) înainte de procesare."
+            "The PDF contains no selectable text. If this is a scanned or photographed resume, "
+            "OCR (for example, Tesseract) must be added before processing."
         )
     return text
 
@@ -240,8 +242,8 @@ def _extract_job_cached(job_title: str, job_description: str) -> dict:
 
     if not grounded_requirements:
         raise ValueError(
-            "Nu am reușit să extrag cerințe verificabile din descrierea jobului. "
-            "Verifică dacă descrierea conține cerințe concrete și textul poate fi selectat."
+            "Could not extract verifiable requirements from the job description. "
+            "Check that the description contains concrete requirements and selectable text."
         )
 
     return {
@@ -253,7 +255,7 @@ def _extract_job_cached(job_title: str, job_description: str) -> dict:
 
 def extract_job_information(job_description: str, job_title: str = "") -> dict:
     if not job_description or not job_description.strip():
-        raise ValueError("Descrierea jobului este goală.")
+        raise ValueError("The job description is empty.")
     return copy.deepcopy(_extract_job_cached(job_title.strip(), _compact_text(job_description)))
 
 
@@ -277,7 +279,7 @@ Return only data matching the required JSON schema."""
 
 def extract_cv_information(cv_text: str) -> dict:
     if not cv_text or not cv_text.strip():
-        raise ValueError("Textul CV-ului este gol.")
+        raise ValueError("The resume text is empty.")
 
     source = _compact_text(cv_text)[:MAX_CV_CHARS]
     extraction = _ollama_extract(
@@ -550,7 +552,7 @@ def calculate_hybrid_match_score(
             # Enforce consistent ranges and do not allow a positive match without evidence.
             if not valid_evidence_ids:
                 status, score = "missing", 0
-                explanation = explanation or "Nu a fost selectată nicio dovadă verificabilă din CV."
+                explanation = explanation or "No verifiable resume evidence was selected."
             elif status == "matched":
                 score = min(100, max(70, score))
             elif status == "partial":
@@ -599,13 +601,13 @@ def calculate_hybrid_match_score(
     avg_semantic = round(float(np.mean(best_similarities)) * 100, 1) if best_similarities else 0.0
 
     explanation = (
-        f"Au fost evaluate {len(requirement_details)} cerințe: {len(matched)} potrivite, "
-        f"{len(partial)} parțiale și {len(missing)} fără dovezi suficiente. "
-        "Scorul este o agregare ponderată a evaluărilor pentru fiecare cerință; "
-        "nu reprezintă probabilitatea de angajare și trebuie validat pe date etichetate."
+        f"Evaluated {len(requirement_details)} requirements: {len(matched)} matched, "
+        f"{len(partial)} partially matched, and {len(missing)} without sufficient evidence. "
+        "The score is a weighted aggregation of requirement-level assessments; "
+        "it is not the probability of being hired and must be validated on labeled data."
     )
     if required_missing:
-        explanation += f" Cerințe obligatorii fără dovezi suficiente: {len(required_missing)}."
+        explanation += f" Required criteria without sufficient evidence: {len(required_missing)}."
 
     return {
         "score": final_score,
@@ -634,23 +636,23 @@ def evaluate_bias(cv_text: str) -> dict:
     if re.search(r"\b(photo|photograph|picture|fotografie|poză|poza)\b", text_lower):
         detected_fields.append("photo_mention")
         warnings.append(
-            "Textul CV-ului menționează o fotografie. Acest test textual nu detectează în mod fiabil imaginile încorporate în PDF."
+            "The resume text mentions a photo. This text-based test does not reliably detect images embedded in the PDF."
         )
 
     if re.search(r"\b(married|single|divorced|children|family|căsătorit|casatorit|necăsătorit|necasatorit|copii)\b", text_lower):
         detected_fields.append("family_or_marital_status_mention")
-        warnings.append("Textul CV-ului pare să menționeze starea civilă sau informații despre familie.")
+        warnings.append("The resume text appears to mention marital status or family information.")
 
     if re.search(r"\b(date of birth|born on|data nașterii|data nasterii)\b", text_lower):
         detected_fields.append("date_of_birth_mention")
-        warnings.append("Textul CV-ului pare să menționeze data nașterii.")
+        warnings.append("The resume text appears to mention a date of birth.")
 
     count = len(detected_fields)
     level = "Low" if count == 0 else ("Medium" if count == 1 else "High")
     recommendation = (
-        "Nu au fost detectați indicatorii textuali configurați. Absența lor nu demonstrează că algoritmul este echitabil."
+        "None of the configured textual indicators were detected. Their absence does not prove that the algorithm is fair."
         if count == 0 else
-        "Revizuiește dacă aceste informații sunt necesare pentru procesul de recrutare și testează separat impactul lor asupra scorului."
+        "Review whether this information is necessary for recruitment and separately test its impact on the score."
     )
     return {
         "bias_level": level,
@@ -659,7 +661,7 @@ def evaluate_bias(cv_text: str) -> dict:
         "warnings": warnings,
         "recommendation": recommendation,
         "scope_note": (
-            "Este doar un screening euristic al unor mențiuni textuale. Nu detectează toate datele sensibile, "
-            "nu verifică fotografia efectivă și nu constituie singur o măsurare a echității algoritmice."
+            "This is only a heuristic screening of textual mentions. It does not detect all sensitive data, "
+            "does not inspect the actual photograph, and is not by itself a measure of algorithmic fairness."
         ),
     }

@@ -201,6 +201,44 @@ def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: st
         ) from exc
 
 
+def test_ollama_generation(timeout_seconds: float = 120.0) -> dict:
+    """Run a tiny generation request to measure whether the local model responds."""
+    started = time.perf_counter()
+    logger.info("[NLP] Running Ollama generation diagnostic with a %.0f-second timeout.", timeout_seconds)
+    try:
+        diagnostic_client = Client(timeout=timeout_seconds)
+        response = diagnostic_client.chat(
+            model=OLLAMA_MODEL,
+            messages=[
+                {"role": "user", "content": "Reply with exactly the word READY."}
+            ],
+            options={"temperature": 0, "num_predict": 8},
+        )
+        elapsed = round(time.perf_counter() - started, 2)
+        answer = (response.message.content or "").strip()
+        logger.info("[NLP] Ollama generation diagnostic completed in %.2f seconds.", elapsed)
+        return {
+            "status": "ok",
+            "model": OLLAMA_MODEL,
+            "elapsed_seconds": elapsed,
+            "response": answer,
+            "message": "Ollama successfully generated a response.",
+        }
+    except Exception as exc:
+        elapsed = round(time.perf_counter() - started, 2)
+        logger.exception("[NLP] Ollama generation diagnostic failed after %.2f seconds.", elapsed)
+        return {
+            "status": "error",
+            "model": OLLAMA_MODEL,
+            "elapsed_seconds": elapsed,
+            "message": (
+                f"Ollama did not complete a test generation within the diagnostic request. "
+                f"Check that Ollama is running and the model '{OLLAMA_MODEL}' is installed. "
+                f"Technical details: {exc}"
+            ),
+        }
+
+
 # ---------- PDF text extraction ----------
 
 

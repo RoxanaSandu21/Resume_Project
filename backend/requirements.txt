@@ -10,3 +10,4 @@ streamlit
 requests
 numpy
 pydantic
+python-dotenv

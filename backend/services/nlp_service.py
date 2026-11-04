@@ -300,9 +300,11 @@ same criterion.
 For every requirement:
 - 'text' is a concise normalized description of the criterion.
 - 'category' must be one of the schema categories.
-- 'priority' is 'required' only when the job wording makes it mandatory; use 'preferred'
-  or 'nice_to_have' when the posting says so; otherwise use 'unspecified'. Do not infer
-  that something is mandatory just because it appears in the advertisement.
+- 'priority': duties explicitly listed under "Role and responsibilities" or clearly
+  described as core day-to-day tasks are 'required' unless marked preferred or optional.
+  For profile qualifications and other criteria, use 'required' only when the wording makes
+  them mandatory; use 'preferred' or 'nice_to_have' when the posting says so, otherwise use
+  'unspecified'. Do not treat benefits or generic company statements as requirements.
 - 'source_text' MUST be copied verbatim from the supplied job text. Do not paraphrase it.
 If a criterion cannot be supported by an exact source quote, omit it.
 Return only data matching the required JSON schema. Use the language of the source where

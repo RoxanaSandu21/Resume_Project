@@ -411,6 +411,7 @@ def extract_cv_information(cv_text: str) -> dict:
         x.model_dump()
         for x in extraction.languages
         if _quote_is_in_source(x.evidence, source)
+        and bool(_normalized_for_grounding(x.name))
         and _normalized_for_grounding(x.name) in _normalized_for_grounding(x.evidence)
     ]
 

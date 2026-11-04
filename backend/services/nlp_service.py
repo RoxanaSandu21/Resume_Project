@@ -34,7 +34,7 @@ EMBEDDING_MODEL = os.getenv(
 )
 MAX_JOB_CHARS = 18000
 MAX_CV_CHARS = 26000
-TOP_EVIDENCE_PER_REQUIREMENT = 3
+TOP_EVIDENCE_PER_REQUIREMENT = 5
 
 # These are scoring/configuration values, not a hardcoded list of skills.
 PRIORITY_WEIGHTS = {
@@ -367,6 +367,17 @@ Classify information carefully:
 For every skill, experience, education item, certification, and human language, provide an
 'evidence' field copied VERBATIM from the resume. If no exact supporting quote can be
 provided, omit that item. Do not combine unrelated roles or degrees into one item.
+
+EXPERIENCE DETAIL IS IMPORTANT:
+- For each experience entry, capture the actual responsibility/task/project bullet points
+  belonging to that role, not just its title, employer, and dates.
+- When the resume lists multiple bullets for one role, include the most informative exact
+  bullet text in the evidence field (multiple verbatim sentences/bullets may be included).
+- Do not invent typical duties based on an employer, job title, or industry.
+- If the resume contains only a title/date and no duties, keep that limited evidence; do not
+  manufacture responsibilities.
+- Preserve section context and associate each responsibility with the correct role.
+
 Keep the exact job title, organization, dates, qualification, and institution associated
 with the correct section. Preserve meaningful details instead of leaving a section empty
 when the resume explicitly contains that type of information.
@@ -394,7 +405,14 @@ def extract_cv_information(cv_text: str) -> dict:
     experience = [x.model_dump() for x in extraction.experience if _quote_is_in_source(x.evidence, source)]
     education = [x.model_dump() for x in extraction.education if _quote_is_in_source(x.evidence, source)]
     certifications = [x.model_dump() for x in extraction.certifications if _quote_is_in_source(x.evidence, source)]
-    languages = [x.model_dump() for x in extraction.languages if _quote_is_in_source(x.evidence, source)]
+    # A language entry must be named in its own source quote. This prevents locations
+    # such as "Iasi, Romania" from being misread as proof of Romanian proficiency.
+    languages = [
+        x.model_dump()
+        for x in extraction.languages
+        if _quote_is_in_source(x.evidence, source)
+        and _normalized_for_grounding(x.name) in _normalized_for_grounding(x.evidence)
+    ]
 
     full_name = (extraction.full_name or "Unknown Candidate").strip()
     if full_name.casefold() in {"unknown", "unknown candidate", "not specified", "not provided", "n/a"}:
@@ -440,38 +458,31 @@ def extract_candidate_info(cv_text: str, cv_info: dict | None = None) -> dict:
 
 
 def _chunk_raw_resume_text(text: str, max_chars: int = 420) -> list[str]:
-    """Split the source resume into small, source-grounded excerpts for retrieval."""
-    lines = [line.strip() for line in _compact_text(text).splitlines() if line.strip()]
-    chunks: list[str] = []
-    current_lines: list[str] = []
-    current_length = 0
+    """Split raw CV text into focused, source-grounded line excerpts.
 
-    for line in lines:
-        # Split unusually long single lines at word boundaries.
-        pieces: list[str] = []
+    Keeping bullets separate makes responsibility-level evidence retrievable instead
+    of burying it in a large block dominated by a role title or section heading.
+    """
+    chunks: list[str] = []
+    for raw_line in _compact_text(text).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        # Split unusually long lines at word boundaries without changing their wording.
         remaining = line
         while len(remaining) > max_chars:
             split_at = remaining.rfind(" ", 0, max_chars)
             if split_at <= 0:
                 split_at = max_chars
-            pieces.append(remaining[:split_at].strip())
+            piece = remaining[:split_at].strip()
+            if piece:
+                chunks.append(piece)
             remaining = remaining[split_at:].strip()
         if remaining:
-            pieces.append(remaining)
+            chunks.append(remaining)
 
-        for piece in pieces:
-            extra_length = len(piece) + (1 if current_lines else 0)
-            if current_lines and current_length + extra_length > max_chars:
-                chunks.append("\n".join(current_lines))
-                current_lines = []
-                current_length = 0
-            current_lines.append(piece)
-            current_length += len(piece) + (1 if len(current_lines) > 1 else 0)
-
-    if current_lines:
-        chunks.append("\n".join(current_lines))
     return chunks
-
 
 def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:
     """Build evidence from structured extraction and the original resume text."""

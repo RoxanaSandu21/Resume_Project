@@ -628,6 +628,69 @@ Scores are supporting values only: matched 70-100, partial 30-69, missing 0. The
 probability of hiring success. Return only data matching the JSON schema."""
 
 
+
+def _evidence_supports_requirement(requirement_text: str, evidence_quote: str) -> bool:
+    """Apply conservative evidence gates to prevent known semantic false positives.
+
+    This is not a full semantic entailment model. It blocks common category errors
+    where a nearby title/tool/project is mistaken for proof of a specific capability.
+    """
+    requirement = requirement_text.casefold()
+    quote = evidence_quote.casefold()
+
+    def has_any(patterns: tuple[str, ...]) -> bool:
+        return any(re.search(pattern, quote, re.IGNORECASE) for pattern in patterns)
+
+    if re.search(r"\\benglish\\b|\\blanguage proficiency\\b", requirement):
+        # The language must be named in the CV excerpt and accompanied by an
+        # explicit proficiency/ability statement; an English-written CV is not proof.
+        return (
+            bool(re.search(r"\\benglish\\b", quote))
+            and has_any((
+                r"\\b(native|fluent|proficient|advanced|intermediate|basic)\\b",
+                r"\\b(a[12]|b[12]|c[12])\\b",
+                r"\\b(speak|spoken|speaking|write|written|writing)\\b",
+                r"\\b(level|proficiency)\\b",
+            ))
+        )
+
+    if "network" in requirement:
+        return has_any((
+            r"\\b(network|networking|tcp/?ip|dns|dhcp|router|switch|lan|wan)\\b",
+            r"\\b(firewall|vpn|subnet|ethernet|wi[ -]?fi|wireless|osi model)\\b",
+        ))
+
+    if "pressure" in requirement:
+        return has_any((
+            r"\\b(under pressure|high[- ]pressure|fast[- ]paced|tight deadlines?)\\b",
+            r"\\b(manag(ed|ing) multiple priorities|multiple competing priorities)\\b",
+            r"\\b(urgent requests|time[- ]critical|high[- ]volume environment)\\b",
+        ))
+
+    if "speak" in requirement or "communication" in requirement or "communicat" in requirement:
+        return has_any((
+            r"\\b(communicat(ed|ing|ion)|interact(ed|ing)|present(ed|ing))\\b",
+            r"\\b(taught|teaching|advised|assisted|supported) (students|customers|clients|users)\\b",
+            r"\\b(customer[- ]facing|client[- ]facing|user[- ]facing)\\b",
+            r"\\b(handled|answer(ed|ing)) (customer|client|user) (questions|inquiries|calls)\\b",
+        ))
+
+    if "troubleshoot" in requirement or "support environment" in requirement:
+        return has_any((
+            r"\\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is))\\b",
+            r"\\b(service desk|help desk|technical support|it support)\\b",
+            r"\\b(incident management|logged incidents|resolved (technical )?issues)\\b",
+        ))
+
+    if "audio visual" in requirement or re.search(r"\\bav support\\b", requirement):
+        return has_any((
+            r"\\b(audio[- ]visual|a/v|av equipment|video conferencing|video conference)\\b",
+            r"\\b(projector|microphone|conference room|display setup|sound system)\\b",
+        ))
+
+    return True
+
+
 def _llm_assess_requirements(requirements: list[dict], retrieved: list[list[dict]]) -> dict[int, dict]:
     requirements_payload = []
     for index, (requirement, candidates) in enumerate(zip(requirements, retrieved)):
@@ -724,6 +787,10 @@ def calculate_hybrid_match_score(
             valid_evidence_ids = [
                 evidence_id for evidence_id in assessment.get("evidence_ids", [])
                 if evidence_id in valid_candidate_ids
+                and _evidence_supports_requirement(
+                    requirement["text"],
+                    next(item["quote"] for item in candidates if item["id"] == evidence_id),
+                )
             ]
             status = assessment.get("status", "missing")
             score = int(assessment.get("score", 0))

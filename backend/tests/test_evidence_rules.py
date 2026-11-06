@@ -167,6 +167,20 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertFalse(any("Bachelor" in role for role in roles))
         self.assertTrue(all(_quote_is_in_source(item["evidence"], source) for item in recovered))
 
+    def test_empty_llm_sections_are_filled_from_source_grounded_fallbacks(self):
+        source = (
+            "Programming Languages: Java, Python, C++\\n"
+            "Professional Experience\\n"
+            "Business Sales Advisor Feb 2025 – Sep 2025\\n"
+            "Assisted customers with account questions."
+        )
+        from services.nlp_service import _merge_source_grounded_fallbacks
+
+        skills, experience = _merge_source_grounded_fallbacks(source, [], [])
+        self.assertTrue(any(item["name"] == "Java" for item in skills))
+        self.assertTrue(any(item["role"] == "Business Sales Advisor" for item in experience))
+        self.assertTrue(all(_quote_is_in_source(item["evidence"], source) for item in skills + experience))
+
     def test_coverage_metrics_distinguish_partial_from_fully_matched(self):
         metrics = _calculate_evidence_coverage([
             {"status": "partial", "priority": "required", "evidence": [{"quote": "English CV text"}]},

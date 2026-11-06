@@ -39,7 +39,8 @@ TOP_EVIDENCE_PER_REQUIREMENT = 5
 # These are scoring/configuration values, not a hardcoded list of skills.
 PRIORITY_WEIGHTS = {
     "required": 3.0,
-    "preferred": 2.0,
+    # A preferred criterion is optional, so it carries half the weight of a required one.
+    "preferred": 1.5,
     "nice_to_have": 1.0,
     "unspecified": 1.5,
 }
@@ -1151,10 +1152,24 @@ def _calculate_evidence_coverage(requirement_details: list[dict]) -> dict:
         if item.get("status") in {"matched", "partial"} and item.get("evidence")
     )
     fully_matched = sum(1 for item in requirement_details if item.get("status") == "matched")
+    required_items = [
+        item for item in requirement_details
+        if item.get("priority") == "required"
+    ]
+    required_weight = PRIORITY_WEIGHTS["required"]
+    required_total_weight = len(required_items) * required_weight
+    required_weighted_score = sum(
+        float(item.get("score", 0) or 0) * required_weight
+        for item in required_items
+    )
+    required_criteria_score = (
+        round(required_weighted_score / required_total_weight, 2)
+        if required_total_weight else 0.0
+    )
     required_missing = sum(
         1
-        for item in requirement_details
-        if item.get("priority") == "required" and item.get("status") == "missing"
+        for item in required_items
+        if item.get("status") == "missing"
     )
     return {
         "evidence_covered_count": covered,
@@ -1162,6 +1177,8 @@ def _calculate_evidence_coverage(requirement_details: list[dict]) -> dict:
         "evidence_coverage_percent": round((covered / total) * 100, 2) if total else 0.0,
         "fully_matched_count": fully_matched,
         "required_missing_count": required_missing,
+        "required_criteria_score": required_criteria_score,
+        "required_criteria_count": len(required_items),
     }
 
 
@@ -1190,6 +1207,8 @@ def calculate_hybrid_match_score(
             "evidence_coverage_percent": 0.0,
             "fully_matched_count": 0,
             "required_missing_count": 0,
+            "required_criteria_score": 0.0,
+            "required_criteria_count": 0,
         }
 
     job_data = extract_job_information(job_description, job_title)

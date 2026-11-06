@@ -128,10 +128,10 @@ class EvidenceRuleTests(unittest.TestCase):
 
     def test_source_fallback_extracts_individual_skills(self):
         source = (
-            "Technical Skills\\n"
-            "Programming Languages: C++, C, Java, JavaScript, TypeScript, Python, PHP, HTML, CSS\\n"
-            "Frameworks & Libraries: SpringBoot, React.js, React Native, Node.js, Express\\n"
-            "Databases: SQL, MongoDB, Oracle Database, PostgreSQL\\n"
+            "Technical Skills\n"
+            "Programming Languages: C++, C, Java, JavaScript, TypeScript, Python, PHP, HTML, CSS\n"
+            "Frameworks & Libraries: SpringBoot, React.js, React Native, Node.js, Express\n"
+            "Databases: SQL, MongoDB, Oracle Database, PostgreSQL\n"
             "Tools: Git, GitHub, GitLab"
         )
         from services.nlp_service import _recover_skills_from_source
@@ -150,12 +150,12 @@ class EvidenceRuleTests(unittest.TestCase):
 
     def test_source_fallback_recovers_dated_roles_and_excludes_education(self):
         source = (
-            "Professional Experience\\n"
-            "Business Sales Advisor Feb 2025 – Sep 2025\\n"
-            "Assisted customers with account questions.\\n"
-            "Software Engineer Intern Jul 2023 – Sep 2023\\n"
-            "Worked on an engineering project.\\n"
-            "Education\\n"
+            "Professional Experience\n"
+            "Business Sales Advisor Feb 2025 – Sep 2025\n"
+            "Assisted customers with account questions.\n"
+            "Software Engineer Intern Jul 2023 – Sep 2023\n"
+            "Worked on an engineering project.\n"
+            "Education\n"
             "Bachelor's in Mathematics and Computer Science Oct 2021 – Jul 2025"
         )
         from services.nlp_service import _recover_experience_from_source

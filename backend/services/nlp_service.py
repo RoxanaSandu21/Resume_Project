@@ -918,7 +918,29 @@ def calculate_hybrid_match_score(
              and support_levels.get(item["id"]) == "contextual"),
             None,
         )
-        if "english" in requirement["text"].casefold() and english_context is not None:
+        english_direct_ids = []
+        if assessment is not None:
+            english_direct_ids = [
+                evidence_id for evidence_id in assessment.get("evidence_ids", [])
+                if evidence_id in valid_candidate_ids
+                and support_levels.get(evidence_id) == "direct"
+            ]
+
+        if "english" in requirement["text"].casefold() and english_direct_ids:
+            # An explicit English level/ability statement takes precedence over
+            # the weaker signal that the CV happens to be written in English.
+            valid_evidence_ids = english_direct_ids
+            status = assessment.get("status", "missing")
+            score = int(assessment.get("score", 0))
+            explanation = (assessment.get("explanation") or "").strip()
+            if status == "matched":
+                score = min(100, max(70, score))
+            elif status == "partial":
+                score = min(69, max(30, score))
+            else:
+                status, score = "missing", 0
+                valid_evidence_ids = []
+        elif "english" in requirement["text"].casefold() and english_context is not None:
             valid_evidence_ids = [english_context["id"]]
             status, score = "partial", 50
             explanation = (

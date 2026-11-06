@@ -37,7 +37,7 @@ async def trace_resume_upload_requests(request, call_next):
     """Attach a request ID to upload logs and report total request duration."""
     is_upload = (
         request.method == "POST"
-        and re.fullmatch(r"/jobs/\\d+/upload-cv/", request.url.path) is not None
+        and re.fullmatch(r"/jobs/\d+/upload-cv/", request.url.path) is not None
     )
     if not is_upload:
         return await call_next(request)

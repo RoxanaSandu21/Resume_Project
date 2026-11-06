@@ -185,53 +185,52 @@ def _quote_is_in_source(quote: str, source: str) -> bool:
 
 
 def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: str) -> BaseModel:
-    """Call Ollama, log duration, and validate the structured JSON response."""
+    """Call Ollama with task-specific output limits and log request-level performance."""
+    request_id = _CURRENT_REQUEST_ID.get()
+    schema_name = schema.__name__
+    default_limits = {
+        "CVExtraction": 2048,
+        "JobExtraction": 1024,
+        "MatchAssessmentOutput": 1024,
+    }
+    env_names = {
+        "CVExtraction": "OLLAMA_MAX_PREDICT_CV",
+        "JobExtraction": "OLLAMA_MAX_PREDICT_JOB",
+        "MatchAssessmentOutput": "OLLAMA_MAX_PREDICT_MATCH",
+    }
+    default_limit = default_limits.get(schema_name, 1024)
+    env_name = env_names.get(schema_name)
+    try:
+        max_output_tokens = max(
+            128,
+            int(os.getenv(env_name, str(default_limit))) if env_name else default_limit,
+        )
+    except ValueError:
+        logger.warning(
+            "[NLP][%s] Invalid %s value; using %s output tokens.",
+            request_id,
+            env_name,
+            default_limit,
+        )
+        max_output_tokens = default_limit
+
     started = time.perf_counter()
     print(
-        f"[NLP] Starting Ollama task '{schema.__name__}' using model "
-        f"'{OLLAMA_MODEL}' (input: {len(user_prompt)} characters).",
+        f"[NLP][{request_id}] Starting Ollama task '{schema_name}' using model "
+        f"'{OLLAMA_MODEL}' (input: {len(user_prompt)} characters; "
+        f"output limit: {max_output_tokens} tokens).",
         flush=True,
     )
     logger.info(
-        "[NLP] Starting Ollama task '%s' using model '%s' (input: %s characters).",
-        schema.__name__,
+        "[NLP][%s] Starting Ollama task '%s' using model '%s' "
+        "(input: %s characters; output limit: %s tokens).",
+        request_id,
+        schema_name,
         OLLAMA_MODEL,
         len(user_prompt),
+        max_output_tokens,
     )
     try:
-        request_id = _CURRENT_REQUEST_ID.get()
-        default_limits = {
-            "CVExtraction": 2048,
-            "JobExtraction": 1024,
-            "MatchAssessmentOutput": 1024,
-        }
-        env_names = {
-            "CVExtraction": "OLLAMA_MAX_PREDICT_CV",
-            "JobExtraction": "OLLAMA_MAX_PREDICT_JOB",
-            "MatchAssessmentOutput": "OLLAMA_MAX_PREDICT_MATCH",
-        }
-        schema_name = schema.__name__
-        default_limit = default_limits.get(schema_name, 1024)
-        env_name = env_names.get(schema_name)
-        try:
-            max_output_tokens = max(
-                128,
-                int(os.getenv(env_name, str(default_limit))) if env_name else default_limit,
-            )
-        except ValueError:
-            logger.warning(
-                "[NLP][%s] Invalid %s value; using %s output tokens.",
-                request_id,
-                env_name,
-                default_limit,
-            )
-            max_output_tokens = default_limit
-
-        print(
-            f"[NLP][{request_id}] Starting Ollama task '{schema_name}' "
-            f"with output limit {max_output_tokens} tokens.",
-            flush=True,
-        )
         response = _ollama_client.chat(
             model=OLLAMA_MODEL,
             messages=[
@@ -257,26 +256,30 @@ def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: st
         if done_reason:
             metrics.append(f"done_reason={done_reason}")
         metrics_text = "; " + ", ".join(metrics) if metrics else ""
-        request_id = _CURRENT_REQUEST_ID.get()
         print(
-            f"[NLP][{request_id}] Finished Ollama task '{schema.__name__}' "
+            f"[NLP][{request_id}] Finished Ollama task '{schema_name}' "
             f"in {elapsed:.1f} seconds{metrics_text}.",
             flush=True,
         )
         logger.info(
             "[NLP][%s] Finished Ollama task '%s' in %.1f seconds%s.",
             request_id,
-            schema.__name__,
+            schema_name,
             elapsed,
             metrics_text,
         )
         return parsed
     except Exception as exc:
         elapsed = time.perf_counter() - started
-        print(f"[NLP] FAILED Ollama task '{schema.__name__}' after {elapsed:.1f} seconds: {type(exc).__name__}: {exc}", flush=True)
+        print(
+            f"[NLP][{request_id}] FAILED Ollama task '{schema_name}' after "
+            f"{elapsed:.1f} seconds: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
         logger.exception(
-            "[NLP] Ollama task '%s' failed after %.1f seconds.",
-            schema.__name__,
+            "[NLP][%s] Ollama task '%s' failed after %.1f seconds.",
+            request_id,
+            schema_name,
             elapsed,
         )
         raise RuntimeError(

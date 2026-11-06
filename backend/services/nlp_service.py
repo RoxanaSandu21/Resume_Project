@@ -626,15 +626,30 @@ def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:
                 "quote": writing_sample,
             })
 
-    # Deduplicate repeated quotes while keeping stable evidence IDs.
+    # Deduplicate repeated quotes while keeping stable evidence IDs. A generated
+    # language-context item often duplicates an original resume chunk by design;
+    # retain its semantic marker on the existing source-grounded item instead of
+    # silently deleting the only indication that the CV provides written-English evidence.
     deduplicated = []
-    seen_quotes = set()
+    seen_quotes: dict[str, dict] = {}
     for item in evidence_items:
         key = _normalized_for_grounding(item["quote"])
-        if key and key not in seen_quotes:
-            seen_quotes.add(key)
-            item["id"] = f"E{len(deduplicated) + 1}"
-            deduplicated.append(item)
+        if not key:
+            continue
+
+        existing = seen_quotes.get(key)
+        if existing is not None:
+            if item.get("type") == "language_context":
+                existing["is_english_writing_sample"] = True
+                existing["language_context_label"] = item.get("label", "")
+            continue
+
+        if item.get("type") == "language_context":
+            item["is_english_writing_sample"] = True
+            item["language_context_label"] = item.get("label", "")
+        item["id"] = f"E{len(deduplicated) + 1}"
+        deduplicated.append(item)
+        seen_quotes[key] = item
     return deduplicated
 
 def _retrieve_evidence(job_requirements: list[dict], evidence_items: list[dict]) -> tuple[list[list[dict]], list[float]]:
@@ -654,7 +669,8 @@ def _retrieve_evidence(job_requirements: list[dict], evidence_items: list[dict])
     similarity_matrix = np.matmul(requirement_embeddings, evidence_embeddings.T)
 
     english_sample_index = next(
-        (index for index, item in enumerate(evidence_items) if item.get("type") == "language_context"),
+        (index for index, item in enumerate(evidence_items)
+         if item.get("type") == "language_context" or item.get("is_english_writing_sample")),
         None,
     )
     retrieved_per_requirement: list[list[dict]] = []
@@ -769,7 +785,7 @@ def _evidence_support_level(requirement_text: str, evidence_item: dict) -> str:
         ), quote)
         if explicitly_named and explicit_level:
             return "direct"
-        if evidence_item.get("type") == "language_context":
+        if evidence_item.get("type") == "language_context" or evidence_item.get("is_english_writing_sample"):
             return "contextual"
         return "none"
 
@@ -939,7 +955,7 @@ def calculate_hybrid_match_score(
         # English, but never the spoken or excellent-proficiency part by itself.
         english_context = next(
             (item for item in candidates
-             if item.get("type") == "language_context"
+             if (item.get("type") == "language_context" or item.get("is_english_writing_sample"))
              and support_levels.get(item["id"]) == "contextual"),
             None,
         )

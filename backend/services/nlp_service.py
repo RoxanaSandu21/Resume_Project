@@ -518,7 +518,7 @@ def _recover_experience_from_source(source: str) -> list[dict]:
 
         if prefix:
             # A role and employer are sometimes printed together on one line.
-            parts = re.split(r"\s+(?:\||—|–|-\s+|at)\s+", prefix, maxsplit=1, flags=re.IGNORECASE)
+            parts = re.split(r"\s+(?:\||—|–|-|at)\s+", prefix, maxsplit=1, flags=re.IGNORECASE)
             role = parts[0].strip(" •·-–—|")
             if len(parts) > 1:
                 organization = parts[1].strip(" •·-–—|")
@@ -592,11 +592,15 @@ def _merge_source_grounded_fallbacks(
 
     merged_experience = list(experience)
     experience_keys = {
-        _normalized_for_grounding(f"{item.get('role', '')} {item.get('dates', '')}")
+        _normalized_for_grounding(
+            f"{item.get('role', '')} {item.get('organization', '')} {item.get('dates', '')}"
+        )
         for item in merged_experience
     }
     for item in _recover_experience_from_source(source):
-        key = _normalized_for_grounding(f"{item['role']} {item['dates']}")
+        key = _normalized_for_grounding(
+            f"{item['role']} {item.get('organization', '')} {item['dates']}"
+        )
         if key not in experience_keys:
             merged_experience.append(item)
             experience_keys.add(key)

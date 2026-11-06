@@ -10,6 +10,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from services.nlp_service import (  # noqa: E402
     _build_cv_evidence,
+    _calculate_evidence_coverage,
     _chunk_raw_resume_text,
     _evidence_support_level,
     _evidence_supports_requirement,
@@ -124,6 +125,60 @@ class EvidenceRuleTests(unittest.TestCase):
             _evidence_support_level("Ability to work under pressure", item),
             "none",
         )
+
+    def test_source_fallback_extracts_individual_skills(self):
+        source = (
+            "Technical Skills\\n"
+            "Programming Languages: C++, C, Java, JavaScript, TypeScript, Python, PHP, HTML, CSS\\n"
+            "Frameworks & Libraries: SpringBoot, React.js, React Native, Node.js, Express\\n"
+            "Databases: SQL, MongoDB, Oracle Database, PostgreSQL\\n"
+            "Tools: Git, GitHub, GitLab"
+        )
+        from services.nlp_service import _recover_skills_from_source
+
+        recovered = _recover_skills_from_source(source)
+        names = {item["name"] for item in recovered}
+        self.assertIn("Java", names)
+        self.assertIn("Python", names)
+        self.assertIn("React Native", names)
+        self.assertIn("PostgreSQL", names)
+        self.assertIn("GitHub", names)
+        self.assertNotIn("Programming Languages", names)
+        self.assertTrue(all(_quote_is_in_source(item["evidence"], source) for item in recovered))
+
+    def test_source_fallback_recovers_dated_roles_and_excludes_education(self):
+        source = (
+            "Professional Experience\\n"
+            "Business Sales Advisor Feb 2025 – Sep 2025\\n"
+            "Assisted customers with account questions.\\n"
+            "Software Engineer Intern Jul 2023 – Sep 2023\\n"
+            "Worked on an engineering project.\\n"
+            "Education\\n"
+            "Bachelor's in Mathematics and Computer Science Oct 2021 – Jul 2025"
+        )
+        from services.nlp_service import _recover_experience_from_source
+
+        recovered = _recover_experience_from_source(source)
+        roles = {item["role"] for item in recovered}
+        self.assertIn("Business Sales Advisor", roles)
+        self.assertIn("Software Engineer Intern", roles)
+        self.assertFalse(any("Bachelor" in role for role in roles))
+        self.assertTrue(all(_quote_is_in_source(item["evidence"], source) for item in recovered))
+
+    def test_coverage_metrics_distinguish_partial_from_fully_matched(self):
+        metrics = _calculate_evidence_coverage([
+            {"status": "partial", "priority": "required", "evidence": [{"quote": "English CV text"}]},
+            {"status": "partial", "priority": "required", "evidence": [{"quote": "Business Sales Advisor"}]},
+            {"status": "missing", "priority": "required", "evidence": []},
+            {"status": "missing", "priority": "required", "evidence": []},
+            {"status": "missing", "priority": "required", "evidence": []},
+            {"status": "missing", "priority": "preferred", "evidence": []},
+        ])
+        self.assertEqual(metrics["evidence_covered_count"], 2)
+        self.assertEqual(metrics["requirements_total_count"], 6)
+        self.assertEqual(metrics["evidence_coverage_percent"], 33.33)
+        self.assertEqual(metrics["fully_matched_count"], 0)
+        self.assertEqual(metrics["required_missing_count"], 3)
 
     def test_context_windows_keep_role_title_near_responsibilities(self):
         source = (

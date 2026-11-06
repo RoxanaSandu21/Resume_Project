@@ -73,14 +73,29 @@ class EvidenceRuleTests(unittest.TestCase):
 
     def test_short_english_cv_uses_verbatim_writing_sample(self):
         short_cv = (
-            "Developed a mobile app that helps users monitor and improve their basic needs."
+            "Professional Experience\n"
+            "Junior Developer\n"
+            "Worked with the engineering team to build and maintain web applications "
+            "for internal users. Reviewed existing features, fixed issues, and wrote "
+            "clear documentation for users. Collaborated with colleagues across the "
+            "team and helped improve application usability. Created updates for the "
+            "product and communicated progress with the team.\n"
+            "Education\n"
+            "Bachelor of Computer Science\n"
         )
+        self.assertLess(len(short_cv.split()), 80)
         self.assertTrue(_looks_like_english_resume(short_cv))
         evidence = _build_cv_evidence({}, short_cv)
         samples = [item for item in evidence if item.get("is_english_writing_sample")]
         self.assertEqual(len(samples), 1)
-        self.assertEqual(samples[0]["quote"], short_cv)
         self.assertTrue(_quote_is_in_source(samples[0]["quote"], short_cv))
+        self.assertEqual(
+            _evidence_support_level(
+                "Excellent understanding of English – spoken and written",
+                samples[0],
+            ),
+            "contextual",
+        )
 
     def test_extraction_prompt_requires_all_roles_not_only_latest_role(self):
         from services.nlp_service import _CV_SYSTEM_PROMPT

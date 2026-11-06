@@ -149,8 +149,10 @@ def show_match_metrics(match_details: dict[str, Any], match_score: Any) -> None:
     required_missing_count = int(
         match_details.get("required_missing_count", len(required_missing))
     )
+    required_criteria_score = float(match_details.get("required_criteria_score", 0) or 0)
+    required_criteria_count = int(match_details.get("required_criteria_count", 0) or 0)
 
-    columns = st.columns(4)
+    columns = st.columns(5)
     columns[0].metric("Weighted compatibility", f"{float(match_score or 0):.2f}%")
     columns[1].metric(
         "Evidence coverage",
@@ -159,10 +161,16 @@ def show_match_metrics(match_details: dict[str, Any], match_score: Any) -> None:
     )
     columns[2].metric("Fully matched", fully_matched)
     columns[3].metric("Required without evidence", required_missing_count)
+    columns[4].metric(
+        "Required-only score",
+        f"{required_criteria_score:.2f}%",
+        help=f"Calculated over {required_criteria_count} required criteria; preferred criteria are excluded.",
+    )
     st.caption(
         "Evidence coverage is the share of requirements with at least one accepted "
-        "resume excerpt (matched or partial). It is not a hiring probability or a "
-        "measure of evidence quality."
+        "resume excerpt (matched or partial). The required-only score excludes optional "
+        "criteria. In the overall weighted score, preferred criteria have half the "
+        "weight of required criteria. Neither score is a hiring probability."
     )
 
 

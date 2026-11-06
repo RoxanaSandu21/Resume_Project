@@ -393,13 +393,13 @@ else:
                         f"#{rank} — {candidate.get('full_name', 'Unknown Candidate')} "
                         f"(Score: {score:.2f}%)"
                     ):
+                        match_details = (candidate.get("bias_report") or {}).get("match_details", {})
+                        show_match_metrics(match_details, score)
                         details_left, details_right = st.columns(2)
                         with details_left:
                             st.write(f"**Email:** {candidate.get('email') or 'Unspecified'}")
                             st.write(f"**Phone:** {candidate.get('phone') or 'Unspecified'}")
                             st.write(f"**Submitted:** {candidate.get('submitted_at') or 'Unknown'}")
-                            match_details = (candidate.get("bias_report") or {}).get("match_details", {})
-                            show_match_metrics(match_details, score)
                             st.write("**Matched requirements:**", match_details.get("matched_skills", []))
                             st.write("**Partial requirements:**", match_details.get("partial_requirements", []))
                             st.write("**Missing requirements:**", match_details.get("missing_skills", []))

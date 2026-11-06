@@ -169,9 +169,9 @@ class EvidenceRuleTests(unittest.TestCase):
 
     def test_empty_llm_sections_are_filled_from_source_grounded_fallbacks(self):
         source = (
-            "Programming Languages: Java, Python, C++\\n"
-            "Professional Experience\\n"
-            "Business Sales Advisor Feb 2025 – Sep 2025\\n"
+            "Programming Languages: Java, Python, C++\n"
+            "Professional Experience\n"
+            "Business Sales Advisor Feb 2025 – Sep 2025\n"
             "Assisted customers with account questions."
         )
         from services.nlp_service import _merge_source_grounded_fallbacks

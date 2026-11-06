@@ -669,13 +669,14 @@ def _retrieve_evidence(job_requirements: list[dict], evidence_items: list[dict])
         ):
             # Keep a relevant people-facing role (e.g. Business Sales Advisor)
             # in the candidate set even when its title has modest embedding similarity.
-            forced_context_index = next(
-                (
-                    index for index, item in enumerate(evidence_items)
-                    if _evidence_support_level(job_requirements[requirement_index]["text"], item)
-                    == "contextual"
-                ),
-                None,
+            contextual_indices = [
+                index for index, item in enumerate(evidence_items)
+                if _evidence_support_level(job_requirements[requirement_index]["text"], item)
+                == "contextual"
+            ]
+            forced_context_index = (
+                max(contextual_indices, key=lambda index: float(row[index]))
+                if contextual_indices else None
             )
 
         if forced_context_index is not None and forced_context_index not in selected_indices:

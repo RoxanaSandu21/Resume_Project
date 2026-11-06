@@ -10,6 +10,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from services.nlp_service import (  # noqa: E402
     _build_cv_evidence,
+    PRIORITY_WEIGHTS,
     _calculate_evidence_coverage,
     _chunk_raw_resume_text,
     _evidence_support_level,
@@ -195,6 +196,10 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertEqual(metrics["evidence_coverage_percent"], 33.33)
         self.assertEqual(metrics["fully_matched_count"], 0)
         self.assertEqual(metrics["required_missing_count"], 3)
+        self.assertEqual(metrics["required_criteria_score"], 20.0)
+        self.assertEqual(metrics["required_criteria_count"], 5)
+        self.assertEqual(PRIORITY_WEIGHTS["preferred"], 1.5)
+        self.assertEqual(PRIORITY_WEIGHTS["required"], 3.0)
 
     def test_context_windows_keep_role_title_near_responsibilities(self):
         source = (

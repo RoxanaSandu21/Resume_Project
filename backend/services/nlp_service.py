@@ -739,7 +739,11 @@ def _same_experience_entry(existing: dict, recovered: dict) -> bool:
 
     existing_org = _normalized_for_grounding(existing.get("organization", ""))
     recovered_org = _normalized_for_grounding(recovered.get("organization", ""))
-    if existing_org and recovered_org and existing_org != recovered_org:
+    existing_evidence = existing.get("evidence", "") or ""
+    existing_org_is_local = bool(
+        existing_org and _quote_is_in_source(existing.get("organization", ""), existing_evidence)
+    )
+    if existing_org_is_local and recovered_org and existing_org != recovered_org:
         return False
 
     existing_dates = _experience_date_key(existing.get("dates", ""))
@@ -785,16 +789,24 @@ def _merge_source_grounded_fallbacks(
             merged_experience.append(recovered)
             continue
 
-        # The structured LLM result may identify the role/date but omit the employer
-        # or duties. Enrich that same record instead of discarding the better fallback.
-        if not existing.get("role") or not _quote_is_in_source(existing["role"], source):
+        # A field must appear in this role's own source block, not merely somewhere
+        # else in the resume. This prevents an employer from another section/role
+        # being attached to the current experience record.
+        recovered_block = recovered.get("evidence", "") or ""
+        if (
+            not existing.get("role")
+            or not _quote_is_in_source(existing["role"], recovered_block)
+        ):
             existing["role"] = recovered["role"]
         if (
             not existing.get("organization")
-            or not _quote_is_in_source(existing["organization"], source)
+            or not _quote_is_in_source(existing["organization"], recovered_block)
         ):
             existing["organization"] = recovered["organization"]
-        if not existing.get("dates") or not _quote_is_in_source(existing["dates"], source):
+        if (
+            not existing.get("dates")
+            or not _quote_is_in_source(existing["dates"], recovered_block)
+        ):
             existing["dates"] = recovered["dates"]
 
         responsibilities = list(existing.get("responsibilities", []) or [])

@@ -502,7 +502,7 @@ def _heading_kind(line: str) -> str | None:
 _BULLET_PREFIX_PATTERN = re.compile(r"^\s*(?:[•◦▪●‣⁃*]\s*|[-–—]\s+)")
 _RESPONSIBILITY_START_PATTERN = re.compile(
     r"^(?:assist(?:ed|ing)?|advis(?:e|ed|ing)|answer(?:ed|ing)?|analy[sz](?:e|ed|ing)|"
-    r"build(?:ing)?|collaborat(?:e|ed|ing)|communicat(?:e|ed|ing)|conduct(?:ed|ing)?|"
+    r"build(?:ing)?|built|collaborat(?:e|ed|ing)|communicat(?:e|ed|ing)|conduct(?:ed|ing)?|"
     r"configur(?:e|ed|ing)|coordinat(?:e|ed|ing)|creat(?:e|ed|ing)|debug(?:ged|ging)?|"
     r"deliver(?:ed|ing)|design(?:ed|ing)|develop(?:ed|ing)|diagnos(?:e|ed|ing)|"
     r"document(?:ed|ing)|execut(?:e|ed|ing)|facilitat(?:e|ed|ing)|handl(?:e|ed|ing)|"
@@ -512,10 +512,11 @@ _RESPONSIBILITY_START_PATTERN = re.compile(
     r"participat(?:e|ed|ing)|perform(?:ed|ing)|prepar(?:e|ed|ing)|present(?:ed|ing)|"
     r"process(?:ed|ing)|provid(?:e|ed|ing)|recommend(?:ed|ing)|resolv(?:e|ed|ing)|"
     r"respond(?:ed|ing)|review(?:ed|ing)|schedul(?:e|ed|ing)|support(?:ed|ing)|"
-    r"teach(?:ing|es|ed)?|test(?:ed|ing)|train(?:ed|ing)|troubleshoot(?:ed|ing)?|"
+    r"teach(?:ing|es|ed)?|taught|test(?:ed|ing)|train(?:ed|ing)|troubleshoot(?:ed|ing)?|"
     r"work(?:ed|ing)?|contribut(?:e|ed|ing)|ensur(?:e|ed|ing)|guid(?:e|ed|ing)|"
-    r"explain(?:ed|ing)|demonstrat(?:e|ed|ing)|achiev(?:e|ed|ing)|met|"
-    r"responsible\s+for|in\s+charge\s+of)\b",
+    r"explain(?:ed|ing)|demonstrat(?:e|ed|ing)|achiev(?:e|ed|ing)|met|wrote|made|held|kept|"
+    r"gave|found|ran|took|sent|spoke|used|increas(?:e|ed|ing)|decreas(?:e|ed|ing)|"
+    r"reduc(?:e|ed|ing)|responsible\s+for|in\s+charge\s+of)\b",
     re.IGNORECASE,
 )
 

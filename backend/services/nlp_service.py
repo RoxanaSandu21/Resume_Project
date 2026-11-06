@@ -434,7 +434,7 @@ _BROAD_SKILL_LABELS = {
 
 def _skill_name_key(name: str) -> str:
     """Case-insensitive key that preserves meaningful punctuation such as C vs C++."""
-    return re.sub(r"\\s+", " ", (name or "").casefold()).strip()
+    return re.sub(r"\s+", " ", (name or "").casefold()).strip()
 
 
 def _recover_skills_from_source(source: str) -> list[dict]:

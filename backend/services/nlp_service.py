@@ -1175,8 +1175,17 @@ def calculate_hybrid_match_score(
             "partial_requirements": [],
             "missing_skills": [],
             "requirement_details": [],
+            "required_missing": [],
             "explanation": "Empty CV text.",
+            "semantic_similarity": 0.0,
             "scoring_method": "not_computed",
+            "extracted_requirements_count": 0,
+            "extracted_cv_skills_count": 0,
+            "evidence_covered_count": 0,
+            "requirements_total_count": 0,
+            "evidence_coverage_percent": 0.0,
+            "fully_matched_count": 0,
+            "required_missing_count": 0,
         }
 
     job_data = extract_job_information(job_description, job_title)

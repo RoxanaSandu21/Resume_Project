@@ -12,6 +12,7 @@ from services.nlp_service import (  # noqa: E402
     _build_cv_evidence,
     PRIORITY_WEIGHTS,
     _calculate_evidence_coverage,
+    _calculate_weighted_match_score,
     _chunk_raw_resume_text,
     _evidence_support_level,
     _evidence_supports_requirement,
@@ -200,6 +201,17 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertEqual(metrics["required_criteria_count"], 5)
         self.assertEqual(PRIORITY_WEIGHTS["preferred"], 1.5)
         self.assertEqual(PRIORITY_WEIGHTS["required"], 3.0)
+
+    def test_preferred_criterion_has_half_weight_and_weighted_score_is_transparent(self):
+        details = [
+            {"status": "partial", "score": 50, "priority": "required", "evidence": [{"quote": "English CV text"}]},
+            {"status": "partial", "score": 50, "priority": "required", "evidence": [{"quote": "Business Sales Advisor"}]},
+            {"status": "missing", "score": 0, "priority": "required", "evidence": []},
+            {"status": "missing", "score": 0, "priority": "required", "evidence": []},
+            {"status": "missing", "score": 0, "priority": "required", "evidence": []},
+            {"status": "missing", "score": 0, "priority": "preferred", "evidence": []},
+        ]
+        self.assertEqual(_calculate_weighted_match_score(details), 18.18)
 
     def test_context_windows_keep_role_title_near_responsibilities(self):
         source = (

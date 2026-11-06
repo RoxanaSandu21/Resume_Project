@@ -120,6 +120,28 @@ class EvidenceRuleTests(unittest.TestCase):
             "none",
         )
 
+    def test_software_debugging_is_contextual_not_direct_it_support_evidence(self):
+        requirement = "Troubleshooting experience in a support environment"
+        debugging_item = {
+            "label": "Junior Java Developer | Responsibility",
+            "quote": "Debugged Java application defects and fixed software bugs.",
+            "type": "experience_responsibility",
+        }
+        support_item = {
+            "label": "IT Support Assistant | Responsibility",
+            "quote": "Worked on the IT help desk and resolved user support tickets.",
+            "type": "experience_responsibility",
+        }
+
+        self.assertEqual(
+            _evidence_support_level(requirement, debugging_item),
+            "contextual",
+        )
+        self.assertEqual(
+            _evidence_support_level(requirement, support_item),
+            "direct",
+        )
+
     def test_internship_title_does_not_prove_working_under_pressure(self):
         item = {
             "label": "Software Engineer Intern — Continental Automotive",
@@ -316,7 +338,7 @@ class EvidenceRuleTests(unittest.TestCase):
         evidence_items = [
             {"id": "E1", "type": "experience", "label": "Business Sales Advisor", "text": "Business Sales Advisor", "quote": "Business Sales Advisor"},
             {"id": "E2", "type": "experience_responsibility", "label": "Business Sales Advisor | Responsibility", "text": "Assisted customers with account questions.", "quote": "Assisted customers with account questions."},
-            {"id": "E3", "type": "experience_responsibility", "label": "Junior Java Developer | Responsibility", "text": "Resolved software incidents.", "quote": "Resolved software incidents."},
+            {"id": "E3", "type": "experience_responsibility", "label": "Junior Java Developer | Responsibility", "text": "Debugged Java application defects and fixed software bugs.", "quote": "Debugged Java application defects and fixed software bugs."},
             {"id": "E4", "type": "experience_responsibility", "label": "Junior Java Developer | Responsibility", "text": "Managed multiple priorities under tight deadlines.", "quote": "Managed multiple priorities under tight deadlines."},
         ]
 

@@ -1036,10 +1036,10 @@ def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:
 
     for experience in cv_data.get("experience", []):
         quote = (experience.get("evidence") or "").strip()
+        role = (experience.get("role") or "").strip()
+        organization = (experience.get("organization") or "").strip()
+        label = " — ".join(value for value in (role, organization) if value)
         if quote:
-            role = (experience.get("role") or "").strip()
-            organization = (experience.get("organization") or "").strip()
-            label = " — ".join(value for value in (role, organization) if value)
             evidence_items.append({
                 "id": f"E{len(evidence_items) + 1}",
                 "type": "experience",

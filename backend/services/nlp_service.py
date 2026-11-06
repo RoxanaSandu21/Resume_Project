@@ -1260,7 +1260,9 @@ Evidence discipline:
   A degree in computing does not itself establish networking, troubleshooting, AV support, or
   professional experience. An internship title alone does not establish working under pressure.
   Customer-facing sales/teaching evidence can support communication as transferable, but does not
-  prove IT service-desk or technical support experience.
+  prove IT service-desk or technical support experience. Software debugging, bug fixing, and
+  application issue resolution can be transferable troubleshooting context, but do not by
+  themselves prove work in an IT support, help-desk, or service-desk environment.
 - Do not turn "used/mentioned a tool" into professional experience with it. Distinguish explicit
   skill listing, academic/project use, and professional task experience in your explanation.
 - For language requirements, use explicit natural-language proficiency or evidence of using that
@@ -1340,13 +1342,14 @@ def _evidence_support_level(requirement_text: str, evidence_item: dict) -> str:
 
     if "troubleshoot" in requirement or "support environment" in requirement:
         if has_any((
-            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is))\b",
             r"\b(service desk|help desk|technical support|it support|user support|customer support)\b",
             r"\b(incident management|logged incidents|support tickets|resolved (technical )?(issues|incidents|tickets))\b",
+            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is))\b.{0,80}\b(user|customer|client|support|incident|ticket)\b",
         )):
             return "direct"
         if has_any((
-            r"\b(debug(ged|ging)?|fixed (software )?bugs?|resolved (software )?(issues?|bugs?|errors?)|"
+            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is)|debug(ged|ging)?)\b",
+            r"\b(fixed (software )?bugs?|resolved (software )?(issues?|bugs?|errors?)|"
             r"investigated (software )?(issues?|bugs?|errors?))\b",
         )):
             return "contextual"

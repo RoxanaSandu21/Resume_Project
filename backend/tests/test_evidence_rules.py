@@ -60,7 +60,7 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertTrue(_looks_like_english_resume(english_text))
 
         evidence = _build_cv_evidence({}, english_text)
-        samples = [item for item in evidence if item["type"] == "language_context"]
+        samples = [item for item in evidence if item.get("is_english_writing_sample")]
         self.assertTrue(samples)
         self.assertTrue(_quote_is_in_source(samples[0]["quote"], english_text))
         self.assertEqual(

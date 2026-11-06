@@ -501,22 +501,24 @@ def _heading_kind(line: str) -> str | None:
 
 _BULLET_PREFIX_PATTERN = re.compile(r"^\s*(?:[•◦▪●‣⁃*]\s*|[-–—]\s+)")
 _RESPONSIBILITY_START_PATTERN = re.compile(
-    r"^(?:assisted|assisting|advised|advising|answered|answering|analy[sz]ed|analy[sz]ing|"
-    r"built|building|collaborated|collaborating|communicated|communicating|conducted|conducting|"
-    r"configured|configuring|coordinated|coordinating|created|creating|debugged|debugging|"
-    r"delivered|delivering|designed|designing|developed|developing|diagnosed|diagnosing|"
-    r"documented|documenting|executed|executing|facilitated|facilitating|handled|handling|"
-    r"helped|helping|identified|identifying|implemented|implementing|improved|improving|"
-    r"instructed|instructing|investigated|investigating|led|maintained|maintaining|managed|managing|"
-    r"monitored|monitoring|negotiated|negotiating|operated|operating|organized|organizing|"
-    r"participated|participating|performed|performing|prepared|preparing|presented|presenting|"
-    r"processed|processing|provided|providing|recommended|recommending|resolved|resolving|"
-    r"responded|responding|reviewed|reviewing|scheduled|scheduling|supported|supporting|"
-    r"taught|teaching|tested|testing|trained|training|troubleshot|troubleshooting|"
-    r"worked|working|contributed|contributing|ensured|ensuring|guided|guiding|"
-    r"explained|explaining|demonstrated|demonstrating|achieved|met)\b",
+    r"^(?:assist(?:ed|ing)?|advis(?:e|ed|ing)|answer(?:ed|ing)?|analy[sz](?:e|ed|ing)|"
+    r"build(?:ing)?|collaborat(?:e|ed|ing)|communicat(?:e|ed|ing)|conduct(?:ed|ing)?|"
+    r"configur(?:e|ed|ing)|coordinat(?:e|ed|ing)|creat(?:e|ed|ing)|debug(?:ged|ging)?|"
+    r"deliver(?:ed|ing)|design(?:ed|ing)|develop(?:ed|ing)|diagnos(?:e|ed|ing)|"
+    r"document(?:ed|ing)|execut(?:e|ed|ing)|facilitat(?:e|ed|ing)|handl(?:e|ed|ing)|"
+    r"help(?:ed|ing)?|identif(?:y|ied|ying)|implement(?:ed|ing)|improv(?:e|ed|ing)|"
+    r"instruct(?:ed|ing)|investigat(?:e|ed|ing)|led|maintain(?:ed|ing)|manag(?:e|ed|ing)|"
+    r"monitor(?:ed|ing)|negotiat(?:e|ed|ing)|operat(?:e|ed|ing)|organiz(?:e|ed|ing)|"
+    r"participat(?:e|ed|ing)|perform(?:ed|ing)|prepar(?:e|ed|ing)|present(?:ed|ing)|"
+    r"process(?:ed|ing)|provid(?:e|ed|ing)|recommend(?:ed|ing)|resolv(?:e|ed|ing)|"
+    r"respond(?:ed|ing)|review(?:ed|ing)|schedul(?:e|ed|ing)|support(?:ed|ing)|"
+    r"teach(?:ing|es|ed)?|test(?:ed|ing)|train(?:ed|ing)|troubleshoot(?:ed|ing)?|"
+    r"work(?:ed|ing)?|contribut(?:e|ed|ing)|ensur(?:e|ed|ing)|guid(?:e|ed|ing)|"
+    r"explain(?:ed|ing)|demonstrat(?:e|ed|ing)|achiev(?:e|ed|ing)|met|"
+    r"responsible\s+for|in\s+charge\s+of)\b",
     re.IGNORECASE,
 )
+
 
 _RESPONSIBILITY_LABELS = {
     "responsibilities", "key responsibilities", "main responsibilities",

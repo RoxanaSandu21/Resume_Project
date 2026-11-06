@@ -397,6 +397,208 @@ Extract the full name only when clearly identifiable; otherwise use 'Unknown Can
 Summaries must be brief and must not add unsupported facts. Return only data matching the
 required JSON schema."""
 
+
+_SKILL_SECTION_PATTERN = re.compile(
+    r"^\s*(?P<header>programming languages?|languages?|frameworks?(?:\s*&\s*libraries)?|"
+    r"libraries|databases?|tools|technical skills?|skills?)\s*[:\-]\s*(?P<items>.+)$",
+    re.IGNORECASE,
+)
+_EXPERIENCE_HEADINGS = {
+    "experience", "work experience", "professional experience", "employment history",
+    "work history", "career history", "professional background",
+}
+_NON_EXPERIENCE_HEADINGS = {
+    "education", "education history", "academic background", "skills", "technical skills",
+    "core skills", "languages", "certifications", "certificates", "projects", "interests",
+    "summary", "profile", "professional summary",
+}
+_DATE_POINT = (
+    r"(?:"
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+    r"\.?\s+\d{4}"
+    r"|\d{1,2}[./-]\d{4}"
+    r"|\b(?:19|20)\d{2}\b"
+    r")"
+)
+_DATE_RANGE_PATTERN = re.compile(
+    rf"(?<!\w){_DATE_POINT}\s*(?:[-–—]|\bto\b)\s*"
+    rf"(?:{_DATE_POINT}|\b(?:present|current|now)\b)",
+    re.IGNORECASE,
+)
+_BROAD_SKILL_LABELS = {
+    "programming languages", "languages", "frameworks", "frameworks & libraries",
+    "libraries", "databases", "tools", "skills", "technical skills",
+}
+
+
+def _recover_skills_from_source(source: str) -> list[dict]:
+    """Recover named skills from explicit, source-grounded CV skill-list lines.
+
+    This fallback handles a common structured-extraction failure: the LLM returns
+    an empty list or a category heading instead of the named items after it.
+    Every recovered skill points to the exact line where it appears.
+    """
+    recovered: list[dict] = []
+    seen: set[str] = set()
+
+    for raw_line in source.splitlines():
+        line = raw_line.strip()
+        match = _SKILL_SECTION_PATTERN.match(line)
+        if not match:
+            continue
+
+        header = match.group("header").casefold()
+        category = "tool" if "tool" in header else "technical_skill"
+        values = re.split(r"\s*[,;|•·]\s*", match.group("items"))
+        for value in values:
+            name = re.sub(r"^[\s•·\-–—]+|[\s•·\-–—]+$", "", value).strip()
+            name = re.sub(r"\s+(?:and)\s+", " ", name, flags=re.IGNORECASE).strip()
+            if not name or len(name) > 60:
+                continue
+            normalized = _normalized_for_grounding(name)
+            if not normalized or normalized in _BROAD_SKILL_LABELS or normalized in seen:
+                continue
+            # Do not add an entire prose sentence as one skill.
+            if len(name.split()) > 5:
+                continue
+            recovered.append({
+                "name": name,
+                "category": category,
+                "evidence": line,
+            })
+            seen.add(normalized)
+
+    return recovered
+
+
+def _heading_kind(line: str) -> str | None:
+    normalized = re.sub(r"[^a-z ]", "", line.casefold()).strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    if normalized in _EXPERIENCE_HEADINGS:
+        return "experience"
+    if normalized in _NON_EXPERIENCE_HEADINGS:
+        return normalized
+    return None
+
+
+def _recover_experience_from_source(source: str) -> list[dict]:
+    """Recover dated experience entries when structured LLM extraction omits them.
+
+    The parser relies on date ranges and section boundaries, not on a hardcoded list
+    of job titles or employers. It preserves only text present in the resume and
+    leaves organization blank when it cannot be distinguished safely.
+    """
+    lines = [line.strip() for line in source.splitlines() if line.strip()]
+    recovered: list[dict] = []
+    seen: set[str] = set()
+    section: str | None = None
+
+    for index, line in enumerate(lines):
+        heading = _heading_kind(line)
+        if heading is not None:
+            section = heading
+            continue
+
+        date_match = _DATE_RANGE_PATTERN.search(line)
+        if not date_match:
+            continue
+        if section in {"education", "education history", "academic background", "certifications", "certificates"}:
+            continue
+
+        prefix = line[:date_match.start()].strip(" \t:|,;•·-–—")
+        role = ""
+        organization = ""
+        start_index = index
+
+        if prefix:
+            # A role and employer are sometimes printed together on one line.
+            parts = re.split(r"\s+(?:\||—|–|-\s+|at)\s+", prefix, maxsplit=1, flags=re.IGNORECASE)
+            role = parts[0].strip(" •·-–—|")
+            if len(parts) > 1:
+                organization = parts[1].strip(" •·-–—|")
+        else:
+            previous = []
+            cursor = index - 1
+            while cursor >= 0 and len(previous) < 2:
+                if _heading_kind(lines[cursor]) is not None:
+                    break
+                previous.insert(0, lines[cursor])
+                cursor -= 1
+            if previous:
+                if len(previous) == 1:
+                    role = previous[-1].strip(" •·-–—|")
+                    start_index = index - 1
+                else:
+                    role = previous[-2].strip(" •·-–—|")
+                    organization = previous[-1].strip(" •·-–—|")
+                    start_index = index - 2
+
+        if not role or len(role) > 100:
+            continue
+
+        role_normalized = _normalized_for_grounding(role)
+        if any(term in role_normalized for term in ("bachelor", "master", "degree", "faculty", "university", "college")):
+            continue
+
+        # Capture the heading/date and its immediately following task bullets, but
+        # stop at the next dated entry or section heading to avoid mixing employers.
+        end_index = min(len(lines), index + 5)
+        for cursor in range(index + 1, end_index):
+            if _DATE_RANGE_PATTERN.search(lines[cursor]) or _heading_kind(lines[cursor]) is not None:
+                end_index = cursor
+                break
+
+        evidence = "\n".join(lines[start_index:end_index]).strip()
+        if not evidence or not _quote_is_in_source(evidence, source):
+            evidence = line
+        key = _normalized_for_grounding(f"{role} {organization} {line[date_match.start():date_match.end()]}")
+        if key in seen:
+            continue
+
+        recovered.append({
+            "role": role,
+            "organization": organization,
+            "dates": date_match.group(0),
+            "evidence": evidence,
+        })
+        seen.add(key)
+
+    return recovered
+
+
+def _merge_source_grounded_fallbacks(
+    source: str,
+    skills: list[dict],
+    experience: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Fill omissions in structured extraction without replacing valid LLM results."""
+    merged_skills = list(skills)
+    skill_names = {
+        _normalized_for_grounding(item.get("name", ""))
+        for item in merged_skills
+    }
+    skill_names.discard("")
+    for item in _recover_skills_from_source(source):
+        key = _normalized_for_grounding(item["name"])
+        if key not in skill_names:
+            merged_skills.append(item)
+            skill_names.add(key)
+
+    merged_experience = list(experience)
+    experience_keys = {
+        _normalized_for_grounding(f"{item.get('role', '')} {item.get('dates', '')}")
+        for item in merged_experience
+    }
+    for item in _recover_experience_from_source(source):
+        key = _normalized_for_grounding(f"{item['role']} {item['dates']}")
+        if key not in experience_keys:
+            merged_experience.append(item)
+            experience_keys.add(key)
+
+    return merged_skills, merged_experience
+
+
 def extract_cv_information(cv_text: str) -> dict:
     if not cv_text or not cv_text.strip():
         raise ValueError("The resume text is empty.")
@@ -411,8 +613,14 @@ def extract_cv_information(cv_text: str) -> dict:
     assert isinstance(extraction, CVExtraction)
 
     # Ground every extracted list item in the actual CV text to reduce hallucinated facts.
-    skills = [x.model_dump() for x in extraction.skills if _quote_is_in_source(x.evidence, source)]
+    skills = [
+        x.model_dump()
+        for x in extraction.skills
+        if _quote_is_in_source(x.evidence, source)
+        and _normalized_for_grounding(x.name) not in _BROAD_SKILL_LABELS
+    ]
     experience = [x.model_dump() for x in extraction.experience if _quote_is_in_source(x.evidence, source)]
+    skills, experience = _merge_source_grounded_fallbacks(source, skills, experience)
     education = [x.model_dump() for x in extraction.education if _quote_is_in_source(x.evidence, source)]
     certifications = [x.model_dump() for x in extraction.certifications if _quote_is_in_source(x.evidence, source)]
     # A language entry must be named in its own source quote. This prevents locations

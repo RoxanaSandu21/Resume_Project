@@ -659,13 +659,28 @@ def _retrieve_evidence(job_requirements: list[dict], evidence_items: list[dict])
         ][:TOP_EVIDENCE_PER_REQUIREMENT]
 
         requirement_text = job_requirements[requirement_index]["text"].casefold()
-        if (
-            "english" in requirement_text
-            and english_sample_index is not None
-            and english_sample_index not in selected_indices
+        forced_context_index = None
+        if "english" in requirement_text:
+            forced_context_index = english_sample_index
+        elif (
+            "speak" in requirement_text
+            or "communication" in requirement_text
+            or "communicat" in requirement_text
         ):
+            # Keep a relevant people-facing role (e.g. Business Sales Advisor)
+            # in the candidate set even when its title has modest embedding similarity.
+            forced_context_index = next(
+                (
+                    index for index, item in enumerate(evidence_items)
+                    if _evidence_support_level(job_requirements[requirement_index]["text"], item)
+                    == "contextual"
+                ),
+                None,
+            )
+
+        if forced_context_index is not None and forced_context_index not in selected_indices:
             selected_indices = selected_indices[: max(0, TOP_EVIDENCE_PER_REQUIREMENT - 1)]
-            selected_indices.append(english_sample_index)
+            selected_indices.append(forced_context_index)
             selected_indices.sort(key=lambda idx: float(row[idx]), reverse=True)
 
         retrieved = []

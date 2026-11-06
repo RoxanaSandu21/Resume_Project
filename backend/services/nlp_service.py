@@ -427,7 +427,7 @@ _DATE_RANGE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _BROAD_SKILL_LABELS = {
-    "programming languages", "languages", "frameworks", "frameworks & libraries",
+    "programming languages", "languages", "frameworks", "frameworks libraries",
     "libraries", "databases", "tools", "skills", "technical skills",
 }
 
@@ -1133,6 +1133,29 @@ def _fallback_assessment(best_similarity: float) -> tuple[str, int, str]:
     return "missing", 0, "Fallback: no sufficiently similar evidence was found in the extracted CV information."
 
 
+def _calculate_evidence_coverage(requirement_details: list[dict]) -> dict:
+    """Summarize how many requirements have source-backed assessment evidence."""
+    total = len(requirement_details)
+    covered = sum(
+        1
+        for item in requirement_details
+        if item.get("status") in {"matched", "partial"} and item.get("evidence")
+    )
+    fully_matched = sum(1 for item in requirement_details if item.get("status") == "matched")
+    required_missing = sum(
+        1
+        for item in requirement_details
+        if item.get("priority") == "required" and item.get("status") == "missing"
+    )
+    return {
+        "evidence_covered_count": covered,
+        "requirements_total_count": total,
+        "evidence_coverage_percent": round((covered / total) * 100, 2) if total else 0.0,
+        "fully_matched_count": fully_matched,
+        "required_missing_count": required_missing,
+    }
+
+
 def calculate_hybrid_match_score(
     job_description: str,
     cv_text: str,
@@ -1330,6 +1353,7 @@ def calculate_hybrid_match_score(
         if item["priority"] == "required" and item["status"] == "missing"
     ]
     avg_semantic = round(float(np.mean(best_similarities)) * 100, 1) if best_similarities else 0.0
+    coverage_metrics = _calculate_evidence_coverage(requirement_details)
 
     explanation = (
         f"Evaluated {len(requirement_details)} requirements: {len(matched)} matched, "
@@ -1352,6 +1376,7 @@ def calculate_hybrid_match_score(
         "scoring_method": scoring_method,
         "extracted_requirements_count": len(requirements),
         "extracted_cv_skills_count": len(cv_data.get("skills", [])),
+        **coverage_metrics,
     }
 
 

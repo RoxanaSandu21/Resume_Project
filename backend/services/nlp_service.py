@@ -991,7 +991,16 @@ def calculate_hybrid_match_score(
             if communication_context is not None and not selected_direct_ids:
                 valid_evidence_ids = [communication_context["id"]]
                 status, score = "partial", 50
-                role_label = communication_context.get("label") or communication_context.get("quote") or "the listed role"
+                role_label = communication_context.get("label") or ""
+                if not role_label or role_label == "Original resume excerpt":
+                    role_match = re.search(
+                        r"\b((?:business )?sales advisor|sales representative|sales consultant|"
+                        r"brand ambassador|customer service advisor|client advisor|teacher|"
+                        r"tutor|instructor|trainer|lecturer|educator)\b",
+                        communication_context.get("quote", ""),
+                        re.IGNORECASE,
+                    )
+                    role_label = role_match.group(1) if role_match else "the listed people-facing role"
                 explanation = (
                     f"The CV lists {role_label}, which is relevant people-facing experience "
                     "and provides transferable context for communication. The available "

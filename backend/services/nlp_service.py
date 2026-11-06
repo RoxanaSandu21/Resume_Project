@@ -188,8 +188,9 @@ def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: st
     """Call Ollama with task-specific output limits and log request-level performance."""
     request_id = _CURRENT_REQUEST_ID.get()
     schema_name = schema.__name__
+    # CV extraction returns the largest structured payload; allow enough output for complete JSON.
     default_limits = {
-        "CVExtraction": 2048,
+        "CVExtraction": 4096,
         "JobExtraction": 1024,
         "MatchAssessmentOutput": 1024,
     }

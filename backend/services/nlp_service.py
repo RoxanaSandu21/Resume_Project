@@ -459,18 +459,18 @@ def extract_candidate_info(cv_text: str, cv_info: dict | None = None) -> dict:
 
 
 def _chunk_raw_resume_text(text: str, max_chars: int = 420) -> list[str]:
-    """Split raw CV text into focused, source-grounded line excerpts.
+    """Return focused lines plus overlapping windows that preserve nearby context.
 
-    Keeping bullets separate makes responsibility-level evidence retrievable instead
-    of burying it in a large block dominated by a role title or section heading.
+    Single lines keep retrieval precise. Overlapping windows retain role titles,
+    employers, dates, and adjacent responsibility bullets so that a heading such as
+    "Business Sales Advisor" is not detached from the work described below it.
     """
-    chunks: list[str] = []
+    lines: list[str] = []
     for raw_line in _compact_text(text).splitlines():
         line = raw_line.strip()
         if not line:
             continue
 
-        # Split unusually long lines at word boundaries without changing their wording.
         remaining = line
         while len(remaining) > max_chars:
             split_at = remaining.rfind(" ", 0, max_chars)
@@ -478,12 +478,72 @@ def _chunk_raw_resume_text(text: str, max_chars: int = 420) -> list[str]:
                 split_at = max_chars
             piece = remaining[:split_at].strip()
             if piece:
-                chunks.append(piece)
+                lines.append(piece)
             remaining = remaining[split_at:].strip()
         if remaining:
-            chunks.append(remaining)
+            lines.append(remaining)
+
+    chunks = list(lines)
+
+    # Add overlapping multi-line windows to preserve role/heading context.
+    start = 0
+    while start < len(lines):
+        window: list[str] = []
+        end = start
+        while end < len(lines):
+            candidate = "\n".join(window + [lines[end]])
+            if window and len(candidate) > max_chars:
+                break
+            window.append(lines[end])
+            end += 1
+
+        if len(window) > 1:
+            chunks.append("\n".join(window))
+
+        if end >= len(lines):
+            break
+        start = max(start + 1, end - 2)
 
     return chunks
+
+
+_ENGLISH_FUNCTION_WORDS = frozenset({
+    "the", "and", "of", "to", "for", "with", "from", "that", "this", "which",
+    "who", "where", "when", "while", "although", "because", "is", "are", "was",
+    "were", "be", "been", "have", "has", "had", "will", "can", "do", "does",
+    "did", "not", "into", "through", "during", "between", "within", "without",
+    "our", "their", "they", "we", "you", "it", "its", "these", "those", "also",
+    "by", "on", "at", "an", "or", "but", "if", "than", "then", "there", "about",
+    "across", "over", "under", "as", "your", "how", "more", "such", "each",
+})
+
+
+def _looks_like_english_resume(text: str) -> bool:
+    """Conservatively detect an English-language CV from its natural-language text.
+
+    This is used only to support a partial written-English signal. It must never
+    establish spoken proficiency or an excellent language level.
+    """
+    words = re.findall(r"\b[a-z]+\b", text.casefold())
+    if len(words) < 80:
+        return False
+    common_words = sum(word in _ENGLISH_FUNCTION_WORDS for word in words)
+    return common_words >= 10 and common_words / len(words) >= 0.05
+
+
+def _find_english_writing_sample(text: str) -> str:
+    """Find a substantive, verbatim English CV excerpt suitable as written evidence."""
+    candidates = []
+    for chunk in _chunk_raw_resume_text(text):
+        words = re.findall(r"\b[a-z]+\b", chunk.casefold())
+        common_words = sum(word in _ENGLISH_FUNCTION_WORDS for word in words)
+        if len(words) >= 12 and common_words >= 3:
+            candidates.append((common_words / len(words), common_words, chunk))
+    if not candidates:
+        return ""
+    candidates.sort(reverse=True)
+    return candidates[0][2]
+
 
 def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:
     """Build evidence from structured extraction and the original resume text."""
@@ -543,6 +603,20 @@ def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:
             "quote": chunk,
         })
 
+    # A CV written in English is evidence of written use, not proof of spoken
+    # proficiency. Keep one exact source excerpt so the assessor can award only
+    # a partial written-language signal when no explicit level is listed.
+    if _looks_like_english_resume(cv_text):
+        writing_sample = _find_english_writing_sample(cv_text)
+        if writing_sample:
+            evidence_items.append({
+                "id": f"E{len(evidence_items) + 1}",
+                "type": "language_context",
+                "label": "English-language resume excerpt (written-use evidence)",
+                "text": writing_sample,
+                "quote": writing_sample,
+            })
+
     # Deduplicate repeated quotes while keeping stable evidence IDs.
     deduplicated = []
     seen_quotes = set()
@@ -570,17 +644,34 @@ def _retrieve_evidence(job_requirements: list[dict], evidence_items: list[dict])
     )
     similarity_matrix = np.matmul(requirement_embeddings, evidence_embeddings.T)
 
+    english_sample_index = next(
+        (index for index, item in enumerate(evidence_items) if item.get("type") == "language_context"),
+        None,
+    )
     retrieved_per_requirement: list[list[dict]] = []
     best_similarities: list[float] = []
-    for row in similarity_matrix:
+    for requirement_index, row in enumerate(similarity_matrix):
         order = np.argsort(row)[::-1]
         best_similarities.append(float(row[order[0]]) if len(order) else 0.0)
+        selected_indices = [
+            int(idx) for idx in order
+            if float(row[idx]) >= RETRIEVAL_MIN_SIMILARITY
+        ][:TOP_EVIDENCE_PER_REQUIREMENT]
+
+        requirement_text = job_requirements[requirement_index]["text"].casefold()
+        if (
+            "english" in requirement_text
+            and english_sample_index is not None
+            and english_sample_index not in selected_indices
+        ):
+            selected_indices = selected_indices[: max(0, TOP_EVIDENCE_PER_REQUIREMENT - 1)]
+            selected_indices.append(english_sample_index)
+            selected_indices.sort(key=lambda idx: float(row[idx]), reverse=True)
+
         retrieved = []
-        for idx in order[:TOP_EVIDENCE_PER_REQUIREMENT]:
+        for idx in selected_indices:
             similarity = float(row[idx])
-            if similarity < RETRIEVAL_MIN_SIMILARITY:
-                continue
-            item = dict(evidence_items[int(idx)])
+            item = dict(evidence_items[idx])
             item["semantic_similarity"] = round(similarity, 4)
             retrieved.append(item)
         retrieved_per_requirement.append(retrieved)
@@ -629,66 +720,89 @@ probability of hiring success. Return only data matching the JSON schema."""
 
 
 
-def _evidence_supports_requirement(requirement_text: str, evidence_quote: str) -> bool:
-    """Apply conservative evidence gates to prevent known semantic false positives.
+def _evidence_support_level(requirement_text: str, evidence_item: dict) -> str:
+    """Return 'direct', 'contextual', or 'none' for a source-grounded evidence item.
 
-    This is not a full semantic entailment model. It blocks common category errors
-    where a nearby title/tool/project is mistaken for proof of a specific capability.
+    Contextual evidence may justify a partial match, never a full match by itself.
+    These checks guard known category errors; they are not a complete semantic model.
     """
     requirement = requirement_text.casefold()
-    quote = evidence_quote.casefold()
+    quote = (evidence_item.get("quote") or "").casefold()
+    label = (evidence_item.get("label") or "").casefold()
+    evidence_text = " ".join((label, quote))
 
-    def has_any(patterns: tuple[str, ...]) -> bool:
-        return any(re.search(pattern, quote, re.IGNORECASE) for pattern in patterns)
+    def has_any(patterns: tuple[str, ...], value: str = evidence_text) -> bool:
+        return any(re.search(pattern, value, re.IGNORECASE) for pattern in patterns)
 
-    if re.search(r"\\benglish\\b|\\blanguage proficiency\\b", requirement):
-        # The language must be named in the CV excerpt and accompanied by an
-        # explicit proficiency/ability statement; an English-written CV is not proof.
-        return (
-            bool(re.search(r"\\benglish\\b", quote))
-            and has_any((
-                r"\\b(native|fluent|proficient|advanced|intermediate|basic)\\b",
-                r"\\b(a[12]|b[12]|c[12])\\b",
-                r"\\b(speak|spoken|speaking|write|written|writing)\\b",
-                r"\\b(level|proficiency)\\b",
-            ))
-        )
+    if re.search(r"\benglish\b|language proficiency", requirement):
+        explicitly_named = bool(re.search(r"\benglish\b", quote))
+        explicit_level = has_any((
+            r"\b(native|fluent|proficient|advanced|intermediate|basic)\b",
+            r"\b(a[12]|b[12]|c[12])\b",
+            r"\b(speak|spoken|speaking|write|written|writing)\b",
+            r"\b(level|proficiency)\b",
+        ), quote)
+        if explicitly_named and explicit_level:
+            return "direct"
+        if evidence_item.get("type") == "language_context":
+            return "contextual"
+        return "none"
 
     if "network" in requirement:
-        return has_any((
-            r"\\b(network|networking|tcp/?ip|dns|dhcp|router|switch|lan|wan)\\b",
-            r"\\b(firewall|vpn|subnet|ethernet|wi[ -]?fi|wireless|osi model)\\b",
-        ))
+        return "direct" if has_any((
+            r"\b(network|networking|tcp/?ip|dns|dhcp|router|switch|lan|wan)\b",
+            r"\b(firewall|vpn|subnet|ethernet|wi[ -]?fi|wireless|osi model)\b",
+        )) else "none"
 
     if "pressure" in requirement:
-        return has_any((
-            r"\\b(under pressure|high[- ]pressure|fast[- ]paced|tight deadlines?)\\b",
-            r"\\b(manag(ed|ing) multiple priorities|multiple competing priorities)\\b",
-            r"\\b(urgent requests|time[- ]critical|high[- ]volume environment)\\b",
-        ))
+        return "direct" if has_any((
+            r"\b(under pressure|high[- ]pressure|fast[- ]paced|tight deadlines?)\b",
+            r"\b(manag(ed|ing) multiple priorities|multiple competing priorities)\b",
+            r"\b(urgent requests|time[- ]critical|high[- ]volume environment)\b",
+        )) else "none"
 
     if "speak" in requirement or "communication" in requirement or "communicat" in requirement:
-        return has_any((
-            r"\\b(communicat(ed|ing|ion)|interact(ed|ing)|present(ed|ing))\\b",
-            r"\\b(taught|teaching|advised|assisted|supported) (students|customers|clients|users)\\b",
-            r"\\b(customer[- ]facing|client[- ]facing|user[- ]facing)\\b",
-            r"\\b(handled|answer(ed|ing)) (customer|client|user) (questions|inquiries|calls)\\b",
-        ))
+        if has_any((
+            r"\b(communicat(ed|ing|ion)|interact(ed|ing)|present(ed|ing))\b",
+            r"\b(taught|teaching|advised|assisted|supported) (students|customers|clients|users)\b",
+            r"\b(customer[- ]facing|client[- ]facing|user[- ]facing)\b",
+            r"\b(handled|answer(ed|ing)) (customer|client|user) (questions|inquiries|calls)\b",
+        )):
+            return "direct"
+        if has_any((
+            r"\b(business )?sales advisor\b",
+            r"\bsales (representative|consultant|associate)\b",
+            r"\bbrand ambassador\b",
+            r"\bcustomer service (advisor|representative|agent|associate)\b",
+            r"\b(client advisor|account manager|account executive)\b",
+            r"\b(teacher|tutor|instructor|trainer|lecturer|educator)\b",
+            r"\bretail associate\b",
+        )):
+            return "contextual"
+        return "none"
 
     if "troubleshoot" in requirement or "support environment" in requirement:
-        return has_any((
-            r"\\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is))\\b",
-            r"\\b(service desk|help desk|technical support|it support)\\b",
-            r"\\b(incident management|logged incidents|resolved (technical )?issues)\\b",
-        ))
+        return "direct" if has_any((
+            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is))\b",
+            r"\b(service desk|help desk|technical support|it support)\b",
+            r"\b(incident management|logged incidents|resolved (technical )?issues)\b",
+        )) else "none"
 
-    if "audio visual" in requirement or re.search(r"\\bav support\\b", requirement):
-        return has_any((
-            r"\\b(audio[- ]visual|a/v|av equipment|video conferencing|video conference)\\b",
-            r"\\b(projector|microphone|conference room|display setup|sound system)\\b",
-        ))
+    if "audio visual" in requirement or re.search(r"\bav support\b", requirement):
+        return "direct" if has_any((
+            r"\b(audio[- ]visual|a/v|av equipment|video conferencing|video conference)\b",
+            r"\b(projector|microphone|conference room|display setup|sound system)\b",
+        )) else "none"
 
-    return True
+    return "direct"
+
+
+def _evidence_supports_requirement(requirement_text: str, evidence_quote: str) -> bool:
+    """Backward-compatible boolean wrapper for the evidence-strength gate."""
+    return _evidence_support_level(
+        requirement_text,
+        {"quote": evidence_quote, "label": "", "type": "resume_text"},
+    ) != "none"
 
 
 def _llm_assess_requirements(requirements: list[dict], retrieved: list[list[dict]]) -> dict[int, dict]:
@@ -783,37 +897,93 @@ def calculate_hybrid_match_score(
         assessment = assessment_by_index.get(index)
         valid_candidate_ids = {item["id"] for item in candidates}
 
-        if assessment is not None:
-            valid_evidence_ids = [
-                evidence_id for evidence_id in assessment.get("evidence_ids", [])
-                if evidence_id in valid_candidate_ids
-                and _evidence_supports_requirement(
-                    requirement["text"],
-                    next(item["quote"] for item in candidates if item["id"] == evidence_id),
-                )
-            ]
-            status = assessment.get("status", "missing")
-            score = int(assessment.get("score", 0))
-            explanation = (assessment.get("explanation") or "").strip()
+        support_levels = {
+            item["id"]: _evidence_support_level(requirement["text"], item)
+            for item in candidates
+        }
+        valid_evidence_ids: list[str] = []
+        status = "missing"
+        score = 0
+        explanation = (
+            "No supporting resume excerpt was selected for this requirement, so the "
+            "system cannot count it as a match. This is not proof the candidate lacks "
+            "the skill; it means the current analysis found no usable evidence."
+        )
 
-            # Enforce consistent ranges and do not allow a positive match without evidence.
-            if not valid_evidence_ids:
-                status, score = "missing", 0
-                explanation = (
-                    "No supporting resume excerpt was selected for this requirement, so the "
-                    "system cannot count it as a match. This is not proof the candidate lacks "
-                    "the skill; it means the current analysis found no usable evidence."
-                )
-            elif status == "matched":
-                score = min(100, max(70, score))
-            elif status == "partial":
-                score = min(69, max(30, score))
-            else:
-                status, score = "missing", 0
-                valid_evidence_ids = []
+        # English CV text is a writing sample only. It can support written use of
+        # English, but never the spoken or excellent-proficiency part by itself.
+        english_context = next(
+            (item for item in candidates
+             if item.get("type") == "language_context"
+             and support_levels.get(item["id"]) == "contextual"),
+            None,
+        )
+        if "english" in requirement["text"].casefold() and english_context is not None:
+            valid_evidence_ids = [english_context["id"]]
+            status, score = "partial", 50
+            explanation = (
+                "The resume contains substantive English-language text, which is evidence "
+                "of written use of English. The resume excerpt does not independently "
+                "establish spoken proficiency or an excellent level."
+            )
         else:
-            status, score, explanation = _fallback_assessment(best_similarities[index])
-            valid_evidence_ids = [item["id"] for item in candidates] if status != "missing" else []
+            selected_ids = []
+            if assessment is not None:
+                selected_ids = [
+                    evidence_id for evidence_id in assessment.get("evidence_ids", [])
+                    if evidence_id in valid_candidate_ids
+                    and support_levels.get(evidence_id) in {"direct", "contextual"}
+                ]
+
+            selected_direct_ids = [
+                evidence_id for evidence_id in selected_ids
+                if support_levels.get(evidence_id) == "direct"
+            ]
+
+            communication_context = next(
+                (item for item in candidates
+                 if support_levels.get(item["id"]) == "contextual"),
+                None,
+            ) if (
+                "speak" in requirement["text"].casefold()
+                or "communication" in requirement["text"].casefold()
+                or "communicat" in requirement["text"].casefold()
+            ) else None
+
+            if communication_context is not None and not selected_direct_ids:
+                valid_evidence_ids = [communication_context["id"]]
+                status, score = "partial", 50
+                role_label = communication_context.get("label") or communication_context.get("quote") or "the listed role"
+                explanation = (
+                    f"The CV lists {role_label}, which is relevant people-facing experience "
+                    "and provides transferable context for communication. The available "
+                    "excerpt does not establish the exact level of confidence or direct IT-user "
+                    "support requested."
+                )
+            elif assessment is not None:
+                valid_evidence_ids = selected_direct_ids
+                status = assessment.get("status", "missing")
+                score = int(assessment.get("score", 0))
+                explanation = (assessment.get("explanation") or "").strip()
+
+                if not valid_evidence_ids or status == "missing":
+                    status, score = "missing", 0
+                    valid_evidence_ids = []
+                    explanation = (
+                        "No supporting resume excerpt was selected for this requirement, so the "
+                        "system cannot count it as a match. This is not proof the candidate lacks "
+                        "the skill; it means the current analysis found no usable evidence."
+                    )
+                elif status == "matched":
+                    score = min(100, max(70, score))
+                elif status == "partial":
+                    score = min(69, max(30, score))
+                else:
+                    status, score = "missing", 0
+                    valid_evidence_ids = []
+            else:
+                # Similarity alone must never award points when the local assessor fails.
+                status, score = "missing", 0
 
         selected_evidence = [item for item in candidates if item["id"] in valid_evidence_ids]
         priority = requirement.get("priority", "unspecified")

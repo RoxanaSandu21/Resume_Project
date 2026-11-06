@@ -432,6 +432,11 @@ _BROAD_SKILL_LABELS = {
 }
 
 
+def _skill_name_key(name: str) -> str:
+    """Case-insensitive key that preserves meaningful punctuation such as C vs C++."""
+    return re.sub(r"\\s+", " ", (name or "").casefold()).strip()
+
+
 def _recover_skills_from_source(source: str) -> list[dict]:
     """Recover named skills from explicit, source-grounded CV skill-list lines.
 
@@ -456,8 +461,8 @@ def _recover_skills_from_source(source: str) -> list[dict]:
             name = re.sub(r"\s+(?:and)\s+", " ", name, flags=re.IGNORECASE).strip()
             if not name or len(name) > 60:
                 continue
-            normalized = _normalized_for_grounding(name)
-            if not normalized or normalized in _BROAD_SKILL_LABELS or normalized in seen:
+            normalized = _skill_name_key(name)
+            if not normalized or _normalized_for_grounding(name) in _BROAD_SKILL_LABELS or normalized in seen:
                 continue
             # Do not add an entire prose sentence as one skill.
             if len(name.split()) > 5:
@@ -575,12 +580,12 @@ def _merge_source_grounded_fallbacks(
     """Fill omissions in structured extraction without replacing valid LLM results."""
     merged_skills = list(skills)
     skill_names = {
-        _normalized_for_grounding(item.get("name", ""))
+        _skill_name_key(item.get("name", ""))
         for item in merged_skills
     }
     skill_names.discard("")
     for item in _recover_skills_from_source(source):
-        key = _normalized_for_grounding(item["name"])
+        key = _skill_name_key(item["name"])
         if key not in skill_names:
             merged_skills.append(item)
             skill_names.add(key)

@@ -505,7 +505,7 @@ _RESPONSIBILITY_START_PATTERN = re.compile(
     r"improved|instructed|investigated|led|maintained|managed|monitored|negotiated|"
     r"operated|organized|participated|performed|prepared|presented|processed|provided|"
     r"recommended|resolved|responded|reviewed|scheduled|supported|taught|tested|trained|"
-    r"troubleshot|worked|contributed|ensured|guided|explained|demonstrated|achieved|met)\\b",
+    r"troubleshot|worked|contributed|ensured|guided|explained|demonstrated|achieved|met)\b",
     re.IGNORECASE,
 )
 _RESPONSIBILITY_LABELS = {
@@ -599,7 +599,7 @@ def _recover_experience_from_source(source: str) -> list[dict]:
         if not date_match or section not in {None, "experience"}:
             continue
 
-        prefix = line[:date_match.start()].strip(" \\t:|,;•·-–—")
+        prefix = line[:date_match.start()].strip(" \t:|,;•·-–—")
         role = ""
         organization = ""
         organization_index: int | None = None
@@ -608,7 +608,7 @@ def _recover_experience_from_source(source: str) -> list[dict]:
         if prefix:
             # Common layout: "Role Sep 2025 – present", sometimes with "— Employer".
             parts = re.split(
-                r"\\s+(?:\\||—|–|-|at)\\s+",
+                r"\s+(?:\||—|–|-|at)\s+",
                 _strip_bullet_prefix(prefix),
                 maxsplit=1,
                 flags=re.IGNORECASE,
@@ -668,7 +668,7 @@ def _recover_experience_from_source(source: str) -> list[dict]:
             end_index=end_index,
             organization_index=organization_index,
         )
-        evidence = "\\n".join(lines[start_index:end_index]).strip()
+        evidence = "\n".join(lines[start_index:end_index]).strip()
         if not evidence or not _quote_is_in_source(evidence, source):
             evidence = line
 
@@ -708,8 +708,8 @@ def _experience_date_key(value: str) -> str:
         ("december", "dec"), ("dec", "dec"),
     )
     for alias, canonical in month_aliases:
-        normalized = re.sub(rf"\\b{alias}\\b", canonical, normalized)
-    normalized = re.sub(r"\\b(current|now)\\b", "present", normalized)
+        normalized = re.sub(rf"\b{alias}\b", canonical, normalized)
+    normalized = re.sub(r"\b(current|now)\b", "present", normalized)
     return _normalized_for_grounding(normalized)
 
 

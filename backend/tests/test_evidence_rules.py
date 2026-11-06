@@ -196,6 +196,9 @@ class EvidenceRuleTests(unittest.TestCase):
             "Business Sales Advisor Feb 2025 – Sep 2025\n"
             "Vodafone\n"
             "• Assisted customers with account questions.\n"
+            "IT Support Assistant Jan 2022 – Jun 2022\n"
+            "Acme Support\n"
+            "Provide first-level support to colleagues.\n"
             "Mathematics and Computer Science Teacher Dec 2021 – June 2024\n"
             "Matematica.md\n"
             "• Taught mathematics and explained difficult concepts to students.\n"
@@ -220,6 +223,11 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertEqual(
             by_role["Business Sales Advisor"]["responsibilities"],
             ["Assisted customers with account questions."],
+        )
+        self.assertEqual(by_role["IT Support Assistant"]["organization"], "Acme Support")
+        self.assertEqual(
+            by_role["IT Support Assistant"]["responsibilities"],
+            ["Provide first-level support to colleagues."],
         )
         teacher = by_role["Mathematics and Computer Science Teacher"]
         self.assertEqual(teacher["organization"], "Matematica.md")

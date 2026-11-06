@@ -138,6 +138,8 @@ class EvidenceRuleTests(unittest.TestCase):
 
         recovered = _recover_skills_from_source(source)
         names = {item["name"] for item in recovered}
+        self.assertIn("C++", names)
+        self.assertIn("C", names)
         self.assertIn("Java", names)
         self.assertIn("Python", names)
         self.assertIn("React Native", names)

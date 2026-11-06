@@ -17,7 +17,10 @@ from services.nlp_service import (  # noqa: E402
     _evidence_support_level,
     _evidence_supports_requirement,
     _looks_like_english_resume,
+    _merge_source_grounded_fallbacks,
     _quote_is_in_source,
+    _recover_experience_from_source,
+    _retrieve_evidence,
 )
 
 
@@ -182,6 +185,146 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertTrue(any(item["name"] == "Java" for item in skills))
         self.assertTrue(any(item["role"] == "Business Sales Advisor" for item in experience))
         self.assertTrue(all(_quote_is_in_source(item["evidence"], source) for item in skills + experience))
+
+    def test_experience_parser_recovers_organization_and_responsibilities(self):
+        source = (
+            "Professional Experience\n"
+            "Junior Java Developer Sep 2025 – present\n"
+            "Endava\n"
+            "• Resolved software incidents.\n"
+            "• Managed multiple priorities under tight deadlines.\n"
+            "Business Sales Advisor Feb 2025 – Sep 2025\n"
+            "Vodafone\n"
+            "• Assisted customers with account questions.\n"
+            "Mathematics and Computer Science Teacher Dec 2021 – June 2024\n"
+            "Matematica.md\n"
+            "• Taught mathematics and explained difficult concepts to students.\n"
+            "Technologies\n"
+            "Languages: C++, Java, Python\n"
+            "Education\n"
+            "Bachelor's in Mathematics and Computer Science Oct 2021 – Jul 2025"
+        )
+
+        recovered = _recover_experience_from_source(source)
+        by_role = {item["role"]: item for item in recovered}
+
+        self.assertEqual(by_role["Junior Java Developer"]["organization"], "Endava")
+        self.assertEqual(
+            by_role["Junior Java Developer"]["responsibilities"],
+            [
+                "Resolved software incidents.",
+                "Managed multiple priorities under tight deadlines.",
+            ],
+        )
+        self.assertEqual(by_role["Business Sales Advisor"]["organization"], "Vodafone")
+        self.assertEqual(
+            by_role["Business Sales Advisor"]["responsibilities"],
+            ["Assisted customers with account questions."],
+        )
+        teacher = by_role["Mathematics and Computer Science Teacher"]
+        self.assertEqual(teacher["organization"], "Matematica.md")
+        self.assertEqual(
+            teacher["responsibilities"],
+            ["Taught mathematics and explained difficult concepts to students."],
+        )
+        self.assertNotIn("Technologies", teacher["evidence"])
+        self.assertNotIn("Languages:", teacher["evidence"])
+        self.assertTrue(all(_quote_is_in_source(item["evidence"], source) for item in recovered))
+
+    def test_existing_llm_experience_is_enriched_not_duplicated(self):
+        source = (
+            "Professional Experience\n"
+            "Business Sales Advisor Feb 2025 – Sep 2025\n"
+            "Vodafone\n"
+            "• Assisted customers with account questions.\n"
+            "Technologies\n"
+            "Languages: C++, Java, Python"
+        )
+        existing_llm_entry = {
+            "role": "Business Sales Advisor",
+            "organization": "",
+            "dates": "Feb 2025 – Sep 2025",
+            "responsibilities": [],
+            "evidence": "Business Sales Advisor Feb 2025 – Sep 2025",
+        }
+
+        _, merged = _merge_source_grounded_fallbacks(source, [], [existing_llm_entry])
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["organization"], "Vodafone")
+        self.assertEqual(
+            merged[0]["responsibilities"],
+            ["Assisted customers with account questions."],
+        )
+        self.assertIn("Vodafone", merged[0]["evidence"])
+        self.assertNotIn("Technologies", merged[0]["evidence"])
+        self.assertTrue(_quote_is_in_source(merged[0]["evidence"], source))
+
+    def test_responsibilities_become_separate_source_grounded_evidence(self):
+        source = (
+            "Business Sales Advisor Feb 2025 – Sep 2025\n"
+            "Vodafone\n"
+            "• Assisted customers with account questions."
+        )
+        cv_data = {
+            "experience": [{
+                "role": "Business Sales Advisor",
+                "organization": "Vodafone",
+                "dates": "Feb 2025 – Sep 2025",
+                "evidence": "Business Sales Advisor Feb 2025 – Sep 2025\nVodafone",
+                "responsibilities": ["Assisted customers with account questions."],
+            }]
+        }
+
+        evidence = _build_cv_evidence(cv_data, source)
+        responsibility_items = [
+            item for item in evidence
+            if item["type"] == "experience_responsibility"
+        ]
+
+        self.assertEqual(len(responsibility_items), 1)
+        self.assertEqual(
+            responsibility_items[0]["quote"],
+            "Assisted customers with account questions.",
+        )
+        self.assertTrue(_quote_is_in_source(responsibility_items[0]["quote"], source))
+        self.assertEqual(
+            _evidence_support_level(
+                "Confidence in speaking to users directly",
+                responsibility_items[0],
+            ),
+            "direct",
+        )
+
+    def test_retrieval_keeps_relevant_responsibilities_even_with_low_similarity(self):
+        import numpy as np
+        from unittest.mock import patch
+
+        requirements = [
+            {"text": "Confidence in speaking to users directly", "source_text": "Confidence in speaking to users directly"},
+            {"text": "Troubleshooting experience in a support environment", "source_text": "Troubleshooting experience in a support environment"},
+            {"text": "Ability to work under pressure", "source_text": "Ability to work under pressure"},
+        ]
+        evidence_items = [
+            {"id": "E1", "type": "experience", "label": "Business Sales Advisor", "text": "Business Sales Advisor", "quote": "Business Sales Advisor"},
+            {"id": "E2", "type": "experience_responsibility", "label": "Business Sales Advisor | Responsibility", "text": "Assisted customers with account questions.", "quote": "Assisted customers with account questions."},
+            {"id": "E3", "type": "experience_responsibility", "label": "Junior Java Developer | Responsibility", "text": "Resolved software incidents.", "quote": "Resolved software incidents."},
+            {"id": "E4", "type": "experience_responsibility", "label": "Junior Java Developer | Responsibility", "text": "Managed multiple priorities under tight deadlines.", "quote": "Managed multiple priorities under tight deadlines."},
+        ]
+
+        class ZeroSimilarityModel:
+            def encode(self, texts, **kwargs):
+                if len(texts) == len(requirements):
+                    return np.tile(np.array([[1.0, 0.0]]), (len(texts), 1))
+                return np.tile(np.array([[0.0, 1.0]]), (len(texts), 1))
+
+        with patch("services.nlp_service._get_embedding_model", return_value=ZeroSimilarityModel()):
+            retrieved, _ = _retrieve_evidence(requirements, evidence_items)
+
+        retrieved_ids = [{item["id"] for item in candidates} for candidates in retrieved]
+        self.assertIn("E2", retrieved_ids[0])
+        self.assertIn("E3", retrieved_ids[1])
+        self.assertIn("E4", retrieved_ids[2])
 
     def test_coverage_metrics_distinguish_partial_from_fully_matched(self):
         metrics = _calculate_evidence_coverage([

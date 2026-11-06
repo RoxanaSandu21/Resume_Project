@@ -1143,6 +1143,18 @@ def _fallback_assessment(best_similarity: float) -> tuple[str, int, str]:
     return "missing", 0, "Fallback: no sufficiently similar evidence was found in the extracted CV information."
 
 
+def _calculate_weighted_match_score(requirement_details: list[dict]) -> float:
+    """Calculate the overall weighted score from finalized requirement assessments."""
+    weighted_total = 0.0
+    total_weight = 0.0
+    for item in requirement_details:
+        priority = item.get("priority", "unspecified")
+        weight = PRIORITY_WEIGHTS.get(priority, PRIORITY_WEIGHTS["unspecified"])
+        weighted_total += float(item.get("score", 0) or 0) * weight
+        total_weight += weight
+    return round(weighted_total / total_weight, 2) if total_weight else 0.0
+
+
 def _calculate_evidence_coverage(requirement_details: list[dict]) -> dict:
     """Summarize how many requirements have source-backed assessment evidence."""
     total = len(requirement_details)
@@ -1228,8 +1240,6 @@ def calculate_hybrid_match_score(
         scoring_method = "embedding_fallback_only"
 
     requirement_details = []
-    weighted_total = 0.0
-    total_weight = 0.0
 
     for index, requirement in enumerate(requirements):
         candidates = retrieved[index]
@@ -1357,9 +1367,6 @@ def calculate_hybrid_match_score(
 
         selected_evidence = [item for item in candidates if item["id"] in valid_evidence_ids]
         priority = requirement.get("priority", "unspecified")
-        weight = PRIORITY_WEIGHTS.get(priority, PRIORITY_WEIGHTS["unspecified"])
-        weighted_total += score * weight
-        total_weight += weight
 
         requirement_details.append({
             "requirement": requirement["text"],
@@ -1381,7 +1388,7 @@ def calculate_hybrid_match_score(
             "explanation": explanation,
         })
 
-    final_score = round(weighted_total / total_weight, 2) if total_weight else 0.0
+    final_score = _calculate_weighted_match_score(requirement_details)
     matched = [item["requirement"] for item in requirement_details if item["status"] == "matched"]
     partial = [item["requirement"] for item in requirement_details if item["status"] == "partial"]
     missing = [item["requirement"] for item in requirement_details if item["status"] == "missing"]

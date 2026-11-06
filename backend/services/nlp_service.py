@@ -1196,11 +1196,12 @@ def _retrieve_evidence(job_requirements: list[dict], evidence_items: list[dict])
                 in {"direct", "contextual"}
             ]
         elif "troubleshoot" in requirement_text or "support environment" in requirement_text:
-            # A responsibility may explicitly describe troubleshooting while the
-            # job title itself has little semantic similarity to the requirement.
+            # Preserve both explicit support/troubleshooting evidence and related
+            # software-debugging duties; the latter can only support a partial result.
             forced_indices = [
                 index for index, item in enumerate(evidence_items)
-                if _evidence_support_level(job_requirements[requirement_index]["text"], item) == "direct"
+                if _evidence_support_level(job_requirements[requirement_index]["text"], item)
+                in {"direct", "contextual"}
             ]
         elif "pressure" in requirement_text:
             forced_indices = [
@@ -1338,12 +1339,18 @@ def _evidence_support_level(requirement_text: str, evidence_item: dict) -> str:
         return "none"
 
     if "troubleshoot" in requirement or "support environment" in requirement:
-        return "direct" if has_any((
-            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is)|debug(ged|ging)?)\b",
-            r"\b(service desk|help desk|technical support|it support)\b",
-            r"\b(incident management|logged incidents|resolved (technical )?(issues|incidents|tickets))\b",
-            r"\b(identified|investigated|fixed|resolved) (software |technical )?(issues?|bugs?|errors?|incidents?|tickets?)\b",
-        )) else "none"
+        if has_any((
+            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is))\b",
+            r"\b(service desk|help desk|technical support|it support|user support|customer support)\b",
+            r"\b(incident management|logged incidents|support tickets|resolved (technical )?(issues|incidents|tickets))\b",
+        )):
+            return "direct"
+        if has_any((
+            r"\b(debug(ged|ging)?|fixed (software )?bugs?|resolved (software )?(issues?|bugs?|errors?)|"
+            r"investigated (software )?(issues?|bugs?|errors?))\b",
+        )):
+            return "contextual"
+        return "none"
 
     if "audio visual" in requirement or re.search(r"\bav support\b", requirement):
         return "direct" if has_any((
@@ -1589,6 +1596,15 @@ def calculate_hybrid_match_score(
                 or "communicat" in requirement["text"].casefold()
             ) else None
 
+            troubleshooting_context = next(
+                (item for item in candidates
+                 if support_levels.get(item["id"]) == "contextual"),
+                None,
+            ) if (
+                "troubleshoot" in requirement["text"].casefold()
+                or "support environment" in requirement["text"].casefold()
+            ) else None
+
             if communication_context is not None and not selected_direct_ids:
                 valid_evidence_ids = [communication_context["id"]]
                 status, score = "partial", 50
@@ -1607,6 +1623,15 @@ def calculate_hybrid_match_score(
                     "and provides transferable context for communication. The available "
                     "excerpt does not establish the exact level of confidence or direct IT-user "
                     "support requested."
+                )
+            elif troubleshooting_context is not None and not selected_direct_ids:
+                valid_evidence_ids = [troubleshooting_context["id"]]
+                status, score = "partial", 50
+                explanation = (
+                    "The CV describes related software debugging or issue-resolution work, "
+                    "which is transferable to troubleshooting. The excerpt does not establish "
+                    "that this work took place in an IT support, help-desk, or service-desk "
+                    "environment."
                 )
             elif assessment is not None:
                 valid_evidence_ids = selected_direct_ids

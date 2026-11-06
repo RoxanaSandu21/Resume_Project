@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import time
+from contextvars import ContextVar
 from functools import lru_cache
 from typing import Literal
 
@@ -49,6 +50,17 @@ RETRIEVAL_MIN_SIMILARITY = 0.10
 
 _embedding_model: SentenceTransformer | None = None
 logger = logging.getLogger(__name__)
+_CURRENT_REQUEST_ID: ContextVar[str] = ContextVar("resume_processing_request_id", default="standalone")
+
+
+def set_processing_request_id(request_id: str):
+    """Attach an upload request ID to NLP logs for this request context."""
+    return _CURRENT_REQUEST_ID.set(request_id)
+
+
+def reset_processing_request_id(token) -> None:
+    """Restore the previous NLP request context."""
+    _CURRENT_REQUEST_ID.reset(token)
 
 
 # ---------- Structured output schemas for Ollama ----------
@@ -187,6 +199,39 @@ def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: st
         len(user_prompt),
     )
     try:
+        request_id = _CURRENT_REQUEST_ID.get()
+        default_limits = {
+            "CVExtraction": 2048,
+            "JobExtraction": 1024,
+            "MatchAssessmentOutput": 1024,
+        }
+        env_names = {
+            "CVExtraction": "OLLAMA_MAX_PREDICT_CV",
+            "JobExtraction": "OLLAMA_MAX_PREDICT_JOB",
+            "MatchAssessmentOutput": "OLLAMA_MAX_PREDICT_MATCH",
+        }
+        schema_name = schema.__name__
+        default_limit = default_limits.get(schema_name, 1024)
+        env_name = env_names.get(schema_name)
+        try:
+            max_output_tokens = max(
+                128,
+                int(os.getenv(env_name, str(default_limit))) if env_name else default_limit,
+            )
+        except ValueError:
+            logger.warning(
+                "[NLP][%s] Invalid %s value; using %s output tokens.",
+                request_id,
+                env_name,
+                default_limit,
+            )
+            max_output_tokens = default_limit
+
+        print(
+            f"[NLP][{request_id}] Starting Ollama task '{schema_name}' "
+            f"with output limit {max_output_tokens} tokens.",
+            flush=True,
+        )
         response = _ollama_client.chat(
             model=OLLAMA_MODEL,
             messages=[
@@ -194,15 +239,36 @@ def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: st
                 {"role": "user", "content": user_prompt},
             ],
             format=schema.model_json_schema(),
-            options={"temperature": 0},
+            options={"temperature": 0, "num_predict": max_output_tokens},
         )
         parsed = schema.model_validate_json(response.message.content)
         elapsed = time.perf_counter() - started
-        print(f"[NLP] Finished Ollama task '{schema.__name__}' in {elapsed:.1f} seconds.", flush=True)
+        generated_tokens = getattr(response, "eval_count", None)
+        generation_duration_ns = getattr(response, "eval_duration", None)
+        generation_speed = None
+        if generated_tokens and generation_duration_ns:
+            generation_speed = generated_tokens / (generation_duration_ns / 1_000_000_000)
+        done_reason = getattr(response, "done_reason", None)
+        metrics = []
+        if generated_tokens is not None:
+            metrics.append(f"output_tokens={generated_tokens}")
+        if generation_speed is not None:
+            metrics.append(f"generation_tokens_per_second={generation_speed:.2f}")
+        if done_reason:
+            metrics.append(f"done_reason={done_reason}")
+        metrics_text = "; " + ", ".join(metrics) if metrics else ""
+        request_id = _CURRENT_REQUEST_ID.get()
+        print(
+            f"[NLP][{request_id}] Finished Ollama task '{schema.__name__}' "
+            f"in {elapsed:.1f} seconds{metrics_text}.",
+            flush=True,
+        )
         logger.info(
-            "[NLP] Finished Ollama task '%s' in %.1f seconds.",
+            "[NLP][%s] Finished Ollama task '%s' in %.1f seconds%s.",
+            request_id,
             schema.__name__,
             elapsed,
+            metrics_text,
         )
         return parsed
     except Exception as exc:
@@ -344,7 +410,16 @@ def _extract_job_cached(job_title: str, job_description: str) -> dict:
 def extract_job_information(job_description: str, job_title: str = "") -> dict:
     if not job_description or not job_description.strip():
         raise ValueError("The job description is empty.")
-    return copy.deepcopy(_extract_job_cached(job_title.strip(), _compact_text(job_description)))
+    cache_before = _extract_job_cached.cache_info()
+    result = _extract_job_cached(job_title.strip(), _compact_text(job_description))
+    cache_after = _extract_job_cached.cache_info()
+    cache_result = "hit" if cache_after.hits > cache_before.hits else "miss"
+    print(
+        f"[NLP][{_CURRENT_REQUEST_ID.get()}] Job extraction cache: {cache_result} "
+        f"(hits={cache_after.hits}, misses={cache_after.misses}).",
+        flush=True,
+    )
+    return copy.deepcopy(result)
 
 
 # ---------- CV extraction ----------
@@ -1274,8 +1349,9 @@ Evidence discipline:
 If no candidate excerpt supports the requirement, return status "missing", score 0, an empty
 evidence_ids list, and explain that the resume does not provide evidence. Do not claim the candidate
 has or lacks an unsupported fact. Return exactly one assessment per requirement_index.
-Scores are supporting values only: matched 70-100, partial 30-69, missing 0. They are not a
-probability of hiring success. Return only data matching the JSON schema."""
+Keep each explanation to one concise sentence (maximum 25 words); do not repeat the requirement
+or reproduce long source excerpts. Scores are supporting values only: matched 70-100, partial
+30-69, missing 0. They are not a probability of hiring success. Return only data matching the JSON schema."""
 
 
 

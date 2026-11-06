@@ -368,15 +368,22 @@ For every skill, experience, education item, certification, and human language, 
 'evidence' field copied VERBATIM from the resume. If no exact supporting quote can be
 provided, omit that item. Do not combine unrelated roles or degrees into one item.
 
-EXPERIENCE DETAIL IS IMPORTANT:
-- For each experience entry, capture the actual responsibility/task/project bullet points
-  belonging to that role, not just its title, employer, and dates.
-- When the resume lists multiple bullets for one role, include the most informative exact
-  bullet text in the evidence field (multiple verbatim sentences/bullets may be included).
-- Do not invent typical duties based on an employer, job title, or industry.
-- If the resume contains only a title/date and no duties, keep that limited evidence; do not
-  manufacture responsibilities.
-- Preserve section context and associate each responsibility with the correct role.
+EXPERIENCE EXTRACTION MUST BE EXHAUSTIVE:
+- Review the ENTIRE resume from beginning to end and extract EVERY distinct work/experience
+  entry. Do not stop after the current or most recent job, and do not return only the most
+  detailed role.
+- Include employment, sales/business roles, customer-facing roles, teaching/tutoring,
+  internships, brand ambassador work, volunteer work, and other roles when they appear.
+- Create a separate experience entry for each distinct role, including concurrent roles.
+- For each entry, preserve its exact role title, organization, and dates when present.
+- Capture the actual responsibility/task/project bullet points belonging to that role, not
+  just its title, employer, and dates. Include multiple verbatim bullets when available.
+- If a role has only a title, organization, and/or dates with no duties, still preserve it as
+  an experience entry with only the exact source text available. Do not invent duties.
+- Associate each responsibility with the correct role. Never move duties from one employer
+  or position to another.
+- Before returning the JSON, perform a final pass over the full resume to check that no
+  earlier role or experience section has been omitted.
 
 Keep the exact job title, organization, dates, qualification, and institution associated
 with the correct section. Preserve meaningful details instead of leaving a section empty
@@ -512,37 +519,39 @@ _ENGLISH_FUNCTION_WORDS = frozenset({
     "who", "where", "when", "while", "although", "because", "is", "are", "was",
     "were", "be", "been", "have", "has", "had", "will", "can", "do", "does",
     "did", "not", "into", "through", "during", "between", "within", "without",
-    "our", "their", "they", "we", "you", "it", "its", "these", "those", "also",
+    "a", "in", "our", "their", "they", "we", "you", "it", "its", "these", "those", "also",
     "by", "on", "at", "an", "or", "but", "if", "than", "then", "there", "about",
     "across", "over", "under", "as", "your", "how", "more", "such", "each",
 })
 
 
 def _looks_like_english_resume(text: str) -> bool:
-    """Conservatively detect an English-language CV from its natural-language text.
+    """Detect a substantive English writing sample without requiring a long CV.
 
     This is used only to support a partial written-English signal. It must never
-    establish spoken proficiency or an excellent language level.
+    establish spoken proficiency or an excellent language level. Short resumes
+    often contain fewer than 80 words of prose, so the decision is based on an
+    actual source excerpt rather than a global word-count threshold.
     """
-    words = re.findall(r"\b[a-z]+\b", text.casefold())
-    if len(words) < 80:
-        return False
-    common_words = sum(word in _ENGLISH_FUNCTION_WORDS for word in words)
-    return common_words >= 10 and common_words / len(words) >= 0.05
+    return bool(_find_english_writing_sample(text))
 
 
 def _find_english_writing_sample(text: str) -> str:
-    """Find a substantive, verbatim English CV excerpt suitable as written evidence."""
+    """Find a substantive, verbatim English CV excerpt suitable as written evidence.
+
+    A short, coherent sentence is enough to show written use; headings and skill
+    lists alone do not qualify because they lack enough natural-language markers.
+    """
     candidates = []
     for chunk in _chunk_raw_resume_text(text):
         words = re.findall(r"\b[a-z]+\b", chunk.casefold())
         common_words = sum(word in _ENGLISH_FUNCTION_WORDS for word in words)
-        if len(words) >= 12 and common_words >= 3:
-            candidates.append((common_words / len(words), common_words, chunk))
+        if len(words) >= 10 and common_words >= 2 and common_words / len(words) >= 0.08:
+            candidates.append((common_words / len(words), common_words, len(chunk), chunk))
     if not candidates:
         return ""
     candidates.sort(reverse=True)
-    return candidates[0][2]
+    return candidates[0][3]
 
 
 def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:

@@ -85,6 +85,10 @@ class CVExperience(BaseModel):
     role: str
     organization: str
     dates: str
+    responsibilities: list[str] = Field(
+        default_factory=list,
+        description="Verbatim duties, tasks, and achievements belonging to this role",
+    )
     evidence: str = Field(description="An exact quote copied from the CV")
 
 
@@ -381,9 +385,13 @@ EXPERIENCE EXTRACTION MUST BE EXHAUSTIVE:
 - Create a separate experience entry for each distinct role, including concurrent roles.
 - For each entry, preserve its exact role title, organization, and dates when present.
 - Capture the actual responsibility/task/project bullet points belonging to that role, not
-  just its title, employer, and dates. Include multiple verbatim bullets when available.
+  just its title, employer, and dates. Return each duty in the separate 'responsibilities'
+  list of that same experience entry.
+- Every responsibility must be a verbatim sentence or bullet copied from the CV. Do not
+  paraphrase, infer, or move a responsibility from another role.
+- Keep section labels such as "Technologies" and general skill lists out of responsibilities.
 - If a role has only a title, organization, and/or dates with no duties, still preserve it as
-  an experience entry with only the exact source text available. Do not invent duties.
+  an experience entry with an empty responsibilities list. Do not invent duties.
 - Associate each responsibility with the correct role. Never move duties from one employer
   or position to another.
 - Before returning the JSON, perform a final pass over the full resume to check that no
@@ -411,6 +419,7 @@ _EXPERIENCE_HEADINGS = {
 _NON_EXPERIENCE_HEADINGS = {
     "education", "education history", "academic background", "skills", "technical skills",
     "core skills", "languages", "certifications", "certificates", "projects", "interests",
+    "technologies", "technology stack", "technical stack", "tools and technologies",
     "summary", "profile", "professional summary",
 }
 _DATE_POINT = (
@@ -488,12 +497,92 @@ def _heading_kind(line: str) -> str | None:
     return None
 
 
-def _recover_experience_from_source(source: str) -> list[dict]:
-    """Recover dated experience entries when structured LLM extraction omits them.
+_BULLET_PREFIX_PATTERN = re.compile(r"^\s*(?:[•◦▪●‣⁃*]\s*|[-–—]\s+)")
+_RESPONSIBILITY_START_PATTERN = re.compile(
+    r"^(?:assisted|advised|answered|analy[sz]ed|built|collaborated|communicated|"
+    r"conducted|configured|coordinated|created|debugged|delivered|designed|developed|"
+    r"diagnosed|documented|executed|facilitated|handled|helped|identified|implemented|"
+    r"improved|instructed|investigated|led|maintained|managed|monitored|negotiated|"
+    r"operated|organized|participated|performed|prepared|presented|processed|provided|"
+    r"recommended|resolved|responded|reviewed|scheduled|supported|taught|tested|trained|"
+    r"troubleshot|worked|contributed|ensured|guided|explained|demonstrated|achieved|met)\\b",
+    re.IGNORECASE,
+)
+_RESPONSIBILITY_LABELS = {
+    "responsibilities", "key responsibilities", "main responsibilities",
+    "duties", "key duties", "achievements", "key achievements",
+}
 
-    The parser relies on date ranges and section boundaries, not on a hardcoded list
-    of job titles or employers. It preserves only text present in the resume and
-    leaves organization blank when it cannot be distinguished safely.
+
+def _strip_bullet_prefix(line: str) -> str:
+    return _BULLET_PREFIX_PATTERN.sub("", line).strip()
+
+
+def _looks_like_organization_line(line: str) -> bool:
+    """Recognize a short, non-sentence employer line without using employer names."""
+    if _BULLET_PREFIX_PATTERN.match(line):
+        return False
+    candidate = _strip_bullet_prefix(line)
+    if (
+        not candidate
+        or len(candidate) > 100
+        or len(candidate.split()) > 8
+        or _DATE_RANGE_PATTERN.search(candidate)
+        or _heading_kind(candidate) is not None
+        or re.search(r"[.!?;:]$", candidate)
+        or _RESPONSIBILITY_START_PATTERN.match(candidate)
+    ):
+        return False
+    return _normalized_for_grounding(candidate) not in _RESPONSIBILITY_LABELS
+
+
+def _extract_responsibilities(
+    lines: list[str],
+    date_index: int,
+    end_index: int,
+    organization_index: int | None,
+) -> list[str]:
+    """Extract source-grounded responsibility lines belonging to one dated role."""
+    responsibilities: list[str] = []
+    for line_index in range(date_index + 1, end_index):
+        if line_index == organization_index:
+            continue
+
+        raw_line = lines[line_index]
+        responsibility = _strip_bullet_prefix(raw_line)
+        if (
+            not responsibility
+            or _DATE_RANGE_PATTERN.search(responsibility)
+            or _heading_kind(responsibility) is not None
+            or _normalized_for_grounding(responsibility) in _RESPONSIBILITY_LABELS
+        ):
+            continue
+
+        is_bullet = bool(_BULLET_PREFIX_PATTERN.match(raw_line))
+        starts_new_duty = bool(_RESPONSIBILITY_START_PATTERN.match(responsibility))
+        if is_bullet or starts_new_duty or not responsibilities:
+            responsibilities.append(responsibility)
+        else:
+            # PDF extraction may wrap one bullet over multiple lines. Join its
+            # continuation instead of treating each visual line as a new duty.
+            responsibilities[-1] = f"{responsibilities[-1]} {responsibility}".strip()
+
+    deduplicated: list[str] = []
+    seen: set[str] = set()
+    for item in responsibilities:
+        key = _normalized_for_grounding(item)
+        if key and key not in seen:
+            deduplicated.append(item)
+            seen.add(key)
+    return deduplicated
+
+
+def _recover_experience_from_source(source: str) -> list[dict]:
+    """Recover dated roles and their employers/duties from the original CV text.
+
+    A date line can contain the role, have the role immediately above it, or
+    have the employer immediately below it. Duties are captured until the next
+    dated role or recognized section heading, rather than an arbitrary line limit.
     """
     lines = [line.strip() for line in source.splitlines() if line.strip()]
     recovered: list[dict] = []
@@ -507,58 +596,85 @@ def _recover_experience_from_source(source: str) -> list[dict]:
             continue
 
         date_match = _DATE_RANGE_PATTERN.search(line)
-        if not date_match:
-            continue
-        if section in {"education", "education history", "academic background", "certifications", "certificates"}:
+        if not date_match or section not in {None, "experience"}:
             continue
 
-        prefix = line[:date_match.start()].strip(" \t:|,;•·-–—")
+        prefix = line[:date_match.start()].strip(" \\t:|,;•·-–—")
         role = ""
         organization = ""
+        organization_index: int | None = None
         start_index = index
 
         if prefix:
-            # A role and employer are sometimes printed together on one line.
-            parts = re.split(r"\s+(?:\||—|–|-|at)\s+", prefix, maxsplit=1, flags=re.IGNORECASE)
-            role = parts[0].strip(" •·-–—|")
+            # Common layout: "Role Sep 2025 – present", sometimes with "— Employer".
+            parts = re.split(
+                r"\\s+(?:\\||—|–|-|at)\\s+",
+                _strip_bullet_prefix(prefix),
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )
+            role = _strip_bullet_prefix(parts[0]).strip(" •·-–—|")
             if len(parts) > 1:
-                organization = parts[1].strip(" •·-–—|")
+                organization = _strip_bullet_prefix(parts[1]).strip(" •·-–—|")
         else:
-            previous = []
+            # Alternate layout: "Role / Employer / Date" on separate lines.
+            previous: list[str] = []
             cursor = index - 1
             while cursor >= 0 and len(previous) < 2:
-                if _heading_kind(lines[cursor]) is not None:
+                if _heading_kind(lines[cursor]) is not None or _DATE_RANGE_PATTERN.search(lines[cursor]):
                     break
                 previous.insert(0, lines[cursor])
                 cursor -= 1
-            if previous:
-                if len(previous) == 1:
-                    role = previous[-1].strip(" •·-–—|")
-                    start_index = index - 1
-                else:
-                    role = previous[-2].strip(" •·-–—|")
-                    organization = previous[-1].strip(" •·-–—|")
-                    start_index = index - 2
+
+            if len(previous) >= 2 and _looks_like_organization_line(previous[-1]):
+                role = _strip_bullet_prefix(previous[-2]).strip(" •·-–—|")
+                organization = _strip_bullet_prefix(previous[-1]).strip(" •·-–—|")
+                organization_index = index - 1
+                start_index = index - 2
+            elif previous:
+                role = _strip_bullet_prefix(previous[-1]).strip(" •·-–—|")
+                start_index = index - 1
+
+        # Common layout in this CV: role/date on one line, employer on the next.
+        if (
+            not organization
+            and index + 1 < len(lines)
+            and _looks_like_organization_line(lines[index + 1])
+        ):
+            organization = _strip_bullet_prefix(lines[index + 1])
+            organization_index = index + 1
 
         if not role or len(role) > 100:
             continue
 
         role_normalized = _normalized_for_grounding(role)
-        if any(term in role_normalized for term in ("bachelor", "master", "degree", "faculty", "university", "college")):
+        if any(
+            term in role_normalized
+            for term in ("bachelor", "master", "degree", "faculty", "university", "college")
+        ):
             continue
 
-        # Capture the heading/date and its immediately following task bullets, but
-        # stop at the next dated entry or section heading to avoid mixing employers.
-        end_index = min(len(lines), index + 5)
-        for cursor in range(index + 1, end_index):
+        # Keep the full role block. Explicit section headings (including Technologies)
+        # and the next dated role are hard boundaries, so unrelated sections cannot leak in.
+        end_index = len(lines)
+        for cursor in range(index + 1, len(lines)):
             if _DATE_RANGE_PATTERN.search(lines[cursor]) or _heading_kind(lines[cursor]) is not None:
                 end_index = cursor
                 break
 
-        evidence = "\n".join(lines[start_index:end_index]).strip()
+        responsibilities = _extract_responsibilities(
+            lines,
+            date_index=index,
+            end_index=end_index,
+            organization_index=organization_index,
+        )
+        evidence = "\\n".join(lines[start_index:end_index]).strip()
         if not evidence or not _quote_is_in_source(evidence, source):
             evidence = line
-        key = _normalized_for_grounding(f"{role} {organization} {line[date_match.start():date_match.end()]}")
+
+        key = _normalized_for_grounding(
+            f"{role} {organization} {line[date_match.start():date_match.end()]}"
+        )
         if key in seen:
             continue
 
@@ -566,6 +682,7 @@ def _recover_experience_from_source(source: str) -> list[dict]:
             "role": role,
             "organization": organization,
             "dates": date_match.group(0),
+            "responsibilities": responsibilities,
             "evidence": evidence,
         })
         seen.add(key)
@@ -573,12 +690,58 @@ def _recover_experience_from_source(source: str) -> list[dict]:
     return recovered
 
 
+def _experience_date_key(value: str) -> str:
+    """Normalize month abbreviations so LLM and source-parsed dates can be paired."""
+    normalized = (value or "").casefold()
+    month_aliases = (
+        ("january", "jan"), ("jan", "jan"),
+        ("february", "feb"), ("feb", "feb"),
+        ("march", "mar"), ("mar", "mar"),
+        ("april", "apr"), ("apr", "apr"),
+        ("may", "may"),
+        ("june", "jun"), ("jun", "jun"),
+        ("july", "jul"), ("jul", "jul"),
+        ("august", "aug"), ("aug", "aug"),
+        ("september", "sep"), ("sept", "sep"), ("sep", "sep"),
+        ("october", "oct"), ("oct", "oct"),
+        ("november", "nov"), ("nov", "nov"),
+        ("december", "dec"), ("dec", "dec"),
+    )
+    for alias, canonical in month_aliases:
+        normalized = re.sub(rf"\\b{alias}\\b", canonical, normalized)
+    normalized = re.sub(r"\\b(current|now)\\b", "present", normalized)
+    return _normalized_for_grounding(normalized)
+
+
+def _same_experience_entry(existing: dict, recovered: dict) -> bool:
+    """Match the same role without collapsing distinct employers or date ranges."""
+    existing_role = _normalized_for_grounding(existing.get("role", ""))
+    recovered_role = _normalized_for_grounding(recovered.get("role", ""))
+    if not existing_role or not recovered_role:
+        return False
+    if existing_role != recovered_role and not (
+        existing_role in recovered_role or recovered_role in existing_role
+    ):
+        return False
+
+    existing_org = _normalized_for_grounding(existing.get("organization", ""))
+    recovered_org = _normalized_for_grounding(recovered.get("organization", ""))
+    if existing_org and recovered_org and existing_org != recovered_org:
+        return False
+
+    existing_dates = _experience_date_key(existing.get("dates", ""))
+    recovered_dates = _experience_date_key(recovered.get("dates", ""))
+    if existing_dates and recovered_dates and existing_dates != recovered_dates:
+        return False
+    return True
+
+
 def _merge_source_grounded_fallbacks(
     source: str,
     skills: list[dict],
     experience: list[dict],
 ) -> tuple[list[dict], list[dict]]:
-    """Fill omissions in structured extraction without replacing valid LLM results."""
+    """Fill omissions and enrich existing roles from deterministic source parsing."""
     merged_skills = list(skills)
     skill_names = {
         _skill_name_key(item.get("name", ""))
@@ -591,20 +754,51 @@ def _merge_source_grounded_fallbacks(
             merged_skills.append(item)
             skill_names.add(key)
 
-    merged_experience = list(experience)
-    experience_keys = {
-        _normalized_for_grounding(
-            f"{item.get('role', '')} {item.get('organization', '')} {item.get('dates', '')}"
+    merged_experience = [dict(item) for item in experience]
+    for item in merged_experience:
+        valid_responsibilities = [
+            value.strip()
+            for value in item.get("responsibilities", []) or []
+            if isinstance(value, str) and value.strip() and _quote_is_in_source(value, source)
+        ]
+        item["responsibilities"] = valid_responsibilities
+
+    for recovered in _recover_experience_from_source(source):
+        existing = next(
+            (item for item in merged_experience if _same_experience_entry(item, recovered)),
+            None,
         )
-        for item in merged_experience
-    }
-    for item in _recover_experience_from_source(source):
-        key = _normalized_for_grounding(
-            f"{item['role']} {item.get('organization', '')} {item['dates']}"
-        )
-        if key not in experience_keys:
-            merged_experience.append(item)
-            experience_keys.add(key)
+        if existing is None:
+            merged_experience.append(recovered)
+            continue
+
+        # The structured LLM result may identify the role/date but omit the employer
+        # or duties. Enrich that same record instead of discarding the better fallback.
+        if not existing.get("role") or not _quote_is_in_source(existing["role"], source):
+            existing["role"] = recovered["role"]
+        if (
+            not existing.get("organization")
+            or not _quote_is_in_source(existing["organization"], source)
+        ):
+            existing["organization"] = recovered["organization"]
+        if not existing.get("dates") or not _quote_is_in_source(existing["dates"], source):
+            existing["dates"] = recovered["dates"]
+
+        responsibilities = list(existing.get("responsibilities", []) or [])
+        responsibility_keys = {
+            _normalized_for_grounding(value) for value in responsibilities
+        }
+        for responsibility in recovered.get("responsibilities", []):
+            key = _normalized_for_grounding(responsibility)
+            if key and key not in responsibility_keys and _quote_is_in_source(responsibility, source):
+                responsibilities.append(responsibility)
+                responsibility_keys.add(key)
+        existing["responsibilities"] = responsibilities
+
+        # Use the parser's bounded, verbatim role block. It restores the employer
+        # and responsibilities while stopping before the next role/section heading.
+        if recovered.get("evidence") and _quote_is_in_source(recovered["evidence"], source):
+            existing["evidence"] = recovered["evidence"]
 
     return merged_skills, merged_experience
 
@@ -629,7 +823,19 @@ def extract_cv_information(cv_text: str) -> dict:
         if _quote_is_in_source(x.evidence, source)
         and _normalized_for_grounding(x.name) not in _BROAD_SKILL_LABELS
     ]
-    experience = [x.model_dump() for x in extraction.experience if _quote_is_in_source(x.evidence, source)]
+    experience = []
+    for item in extraction.experience:
+        if not _quote_is_in_source(item.evidence, source):
+            continue
+        structured_item = item.model_dump()
+        structured_item["responsibilities"] = [
+            responsibility.strip()
+            for responsibility in structured_item.get("responsibilities", []) or []
+            if isinstance(responsibility, str)
+            and responsibility.strip()
+            and _quote_is_in_source(responsibility, source)
+        ]
+        experience.append(structured_item)
     skills, experience = _merge_source_grounded_fallbacks(source, skills, experience)
     education = [x.model_dump() for x in extraction.education if _quote_is_in_source(x.evidence, source)]
     certifications = [x.model_dump() for x in extraction.certifications if _quote_is_in_source(x.evidence, source)]
@@ -832,6 +1038,22 @@ def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:
                 "quote": quote,
             })
 
+        for responsibility in experience.get("responsibilities", []) or []:
+            responsibility_quote = (responsibility or "").strip()
+            if (
+                not responsibility_quote
+                or (cv_text and not _quote_is_in_source(responsibility_quote, cv_text))
+            ):
+                continue
+            responsibility_label = f"{label} | Responsibility" if label else "Role responsibility"
+            evidence_items.append({
+                "id": f"E{len(evidence_items) + 1}",
+                "type": "experience_responsibility",
+                "label": responsibility_label,
+                "text": f"{responsibility_label}. {responsibility_quote}",
+                "quote": responsibility_quote,
+            })
+
     for field, kind, label_key in (
         ("education", "education", "qualification"),
         ("certifications", "certification", "name"),
@@ -932,30 +1154,48 @@ def _retrieve_evidence(job_requirements: list[dict], evidence_items: list[dict])
         ][:TOP_EVIDENCE_PER_REQUIREMENT]
 
         requirement_text = job_requirements[requirement_index]["text"].casefold()
-        forced_context_index = None
+        forced_indices: list[int] = []
         if "english" in requirement_text:
-            forced_context_index = english_sample_index
+            if english_sample_index is not None:
+                forced_indices = [english_sample_index]
         elif (
             "speak" in requirement_text
             or "communication" in requirement_text
             or "communicat" in requirement_text
         ):
-            # Keep a relevant people-facing role (e.g. Business Sales Advisor)
-            # in the candidate set even when its title has modest embedding similarity.
-            contextual_indices = [
+            # Keep both explicit communication duties and transferable people-facing
+            # roles in the candidate set, even when their embedding rank is low.
+            forced_indices = [
                 index for index, item in enumerate(evidence_items)
                 if _evidence_support_level(job_requirements[requirement_index]["text"], item)
-                == "contextual"
+                in {"direct", "contextual"}
             ]
-            forced_context_index = (
-                max(contextual_indices, key=lambda index: float(row[index]))
-                if contextual_indices else None
-            )
+        elif "troubleshoot" in requirement_text or "support environment" in requirement_text:
+            # A responsibility may explicitly describe troubleshooting while the
+            # job title itself has little semantic similarity to the requirement.
+            forced_indices = [
+                index for index, item in enumerate(evidence_items)
+                if _evidence_support_level(job_requirements[requirement_index]["text"], item) == "direct"
+            ]
+        elif "pressure" in requirement_text:
+            forced_indices = [
+                index for index, item in enumerate(evidence_items)
+                if _evidence_support_level(job_requirements[requirement_index]["text"], item) == "direct"
+            ]
 
-        if forced_context_index is not None and forced_context_index not in selected_indices:
-            selected_indices = selected_indices[: max(0, TOP_EVIDENCE_PER_REQUIREMENT - 1)]
-            selected_indices.append(forced_context_index)
-            selected_indices.sort(key=lambda idx: float(row[idx]), reverse=True)
+        # Prefer rule-supported excerpts, then fill remaining slots with the best
+        # semantic candidates. This changes retrieval only; the LLM and evidence
+        # gates still decide whether a requirement is partial, matched, or missing.
+        forced_indices = sorted(
+            set(forced_indices),
+            key=lambda idx: (
+                0 if _evidence_support_level(job_requirements[requirement_index]["text"], evidence_items[idx]) == "direct" else 1,
+                -float(row[idx]),
+            ),
+        )
+        semantic_indices = [idx for idx in selected_indices if idx not in forced_indices]
+        selected_indices = (forced_indices + semantic_indices)[:TOP_EVIDENCE_PER_REQUIREMENT]
+        selected_indices.sort(key=lambda idx: float(row[idx]), reverse=True)
 
         retrieved = []
         for idx in selected_indices:
@@ -987,6 +1227,8 @@ Evidence discipline:
   supports the claim. Never cite merely the closest semantic result; never invent IDs.
 - A title, employer, degree name, or generic summary alone cannot prove a specific skill, task,
   proficiency, or behavior. Use the role's detailed duties only when those duties appear in evidence.
+  Evaluate separately supplied experience-responsibility excerpts as well as role headings;
+  responsibility excerpts must remain associated with the role from which they were extracted.
 - A programming-language list does not establish proficiency in a human language such as English.
   Git, GitHub, GitLab, or source control alone do not establish computer networking knowledge.
   A degree in computing does not itself establish networking, troubleshooting, AV support, or
@@ -1072,9 +1314,10 @@ def _evidence_support_level(requirement_text: str, evidence_item: dict) -> str:
 
     if "troubleshoot" in requirement or "support environment" in requirement:
         return "direct" if has_any((
-            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is))\b",
+            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is)|debug(ged|ging)?)\b",
             r"\b(service desk|help desk|technical support|it support)\b",
-            r"\b(incident management|logged incidents|resolved (technical )?issues)\b",
+            r"\b(incident management|logged incidents|resolved (technical )?(issues|incidents|tickets))\b",
+            r"\b(identified|investigated|fixed|resolved) (software |technical )?(issues?|bugs?|errors?|incidents?|tickets?)\b",
         )) else "none"
 
     if "audio visual" in requirement or re.search(r"\bav support\b", requirement):

@@ -421,7 +421,9 @@ _NON_EXPERIENCE_HEADINGS = {
     "core skills", "languages", "certifications", "certificates", "projects", "interests",
     "technologies", "technology", "technology stack", "technical stack",
     "tools and technologies", "tools technologies",
+    "summary", "profile", "professional summary",
 }
+
 _DATE_POINT = (
     r"(?:"
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
@@ -513,6 +515,14 @@ _RESPONSIBILITY_START_PATTERN = re.compile(
     r"taught|teaching|tested|testing|trained|training|troubleshot|troubleshooting|"
     r"worked|working|contributed|contributing|ensured|ensuring|guided|guiding|"
     r"explained|explaining|demonstrated|demonstrating|achieved|met)\b",
+    re.IGNORECASE,
+)
+
+_RESPONSIBILITY_LABELS = {
+    "responsibilities", "key responsibilities", "main responsibilities",
+    "duties", "key duties", "achievements", "key achievements",
+}
+
 
 def _strip_bullet_prefix(line: str) -> str:
     return _BULLET_PREFIX_PATTERN.sub("", line).strip()

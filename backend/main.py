@@ -165,6 +165,11 @@ def upload_cv(job_id: int, file: UploadFile = File(...), db: Session = Depends(g
         "scoring_method": match_result["scoring_method"],
         "extracted_requirements_count": match_result["extracted_requirements_count"],
         "extracted_cv_skills_count": match_result["extracted_cv_skills_count"],
+        "evidence_covered_count": match_result["evidence_covered_count"],
+        "requirements_total_count": match_result["requirements_total_count"],
+        "evidence_coverage_percent": match_result["evidence_coverage_percent"],
+        "fully_matched_count": match_result["fully_matched_count"],
+        "required_missing_count": match_result["required_missing_count"],
     }
 
     try:

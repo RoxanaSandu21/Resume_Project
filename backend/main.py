@@ -17,6 +17,8 @@ from services.nlp_service import (
     evaluate_bias,
     extract_candidate_info,
     test_ollama_generation,
+    set_processing_request_id,
+    reset_processing_request_id,
 )
 
 # Reuses your existing SQLAlchemy models and schemas.
@@ -32,7 +34,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @app.middleware("http")
 async def trace_resume_upload_requests(request, call_next):
-    """Print request start/end before and after FastAPI parses/processes a resume upload."""
+    """Attach a request ID to upload logs and report total request duration."""
     is_upload = (
         request.method == "POST"
         and re.fullmatch(r"/jobs/\d+/upload-cv/", request.url.path) is not None
@@ -40,27 +42,32 @@ async def trace_resume_upload_requests(request, call_next):
     if not is_upload:
         return await call_next(request)
 
+    request_id = uuid.uuid4().hex[:10]
+    token = set_processing_request_id(request_id)
     started = time.perf_counter()
     print(
-        f"[UPLOAD TRACE] Request received: {request.method} {request.url.path}",
+        f"[UPLOAD TRACE][{request_id}] Request received: {request.method} {request.url.path}",
         flush=True,
     )
     try:
         response = await call_next(request)
         elapsed = time.perf_counter() - started
         print(
-            f"[UPLOAD TRACE] Response completed: HTTP {response.status_code} "
-            f"after {elapsed:.1f} seconds",
+            f"[UPLOAD TRACE][{request_id}] Response completed: "
+            f"HTTP {response.status_code} after {elapsed:.1f} seconds",
             flush=True,
         )
         return response
     except Exception as exc:
         elapsed = time.perf_counter() - started
         print(
-            f"[UPLOAD TRACE] Request raised {type(exc).__name__} after {elapsed:.1f} seconds: {exc}",
+            f"[UPLOAD TRACE][{request_id}] Request raised {type(exc).__name__} "
+            f"after {elapsed:.1f} seconds: {exc}",
             flush=True,
         )
         raise
+    finally:
+        reset_processing_request_id(token)
 
 
 @app.get("/health/")
@@ -165,6 +172,13 @@ def upload_cv(job_id: int, file: UploadFile = File(...), db: Session = Depends(g
         "scoring_method": match_result["scoring_method"],
         "extracted_requirements_count": match_result["extracted_requirements_count"],
         "extracted_cv_skills_count": match_result["extracted_cv_skills_count"],
+        "evidence_covered_count": match_result["evidence_covered_count"],
+        "requirements_total_count": match_result["requirements_total_count"],
+        "evidence_coverage_percent": match_result["evidence_coverage_percent"],
+        "fully_matched_count": match_result["fully_matched_count"],
+        "required_missing_count": match_result["required_missing_count"],
+        "required_criteria_score": match_result["required_criteria_score"],
+        "required_criteria_count": match_result["required_criteria_count"],
     }
 
     try:

@@ -419,8 +419,8 @@ _EXPERIENCE_HEADINGS = {
 _NON_EXPERIENCE_HEADINGS = {
     "education", "education history", "academic background", "skills", "technical skills",
     "core skills", "languages", "certifications", "certificates", "projects", "interests",
-    "technologies", "technology stack", "technical stack", "tools and technologies",
-    "summary", "profile", "professional summary",
+    "technologies", "technology", "technology stack", "technical stack",
+    "tools and technologies", "tools technologies",
 }
 _DATE_POINT = (
     r"(?:"
@@ -499,20 +499,20 @@ def _heading_kind(line: str) -> str | None:
 
 _BULLET_PREFIX_PATTERN = re.compile(r"^\s*(?:[•◦▪●‣⁃*]\s*|[-–—]\s+)")
 _RESPONSIBILITY_START_PATTERN = re.compile(
-    r"^(?:assisted|advised|answered|analy[sz]ed|built|collaborated|communicated|"
-    r"conducted|configured|coordinated|created|debugged|delivered|designed|developed|"
-    r"diagnosed|documented|executed|facilitated|handled|helped|identified|implemented|"
-    r"improved|instructed|investigated|led|maintained|managed|monitored|negotiated|"
-    r"operated|organized|participated|performed|prepared|presented|processed|provided|"
-    r"recommended|resolved|responded|reviewed|scheduled|supported|taught|tested|trained|"
-    r"troubleshot|worked|contributed|ensured|guided|explained|demonstrated|achieved|met)\b",
-    re.IGNORECASE,
-)
-_RESPONSIBILITY_LABELS = {
-    "responsibilities", "key responsibilities", "main responsibilities",
-    "duties", "key duties", "achievements", "key achievements",
-}
-
+    r"^(?:assisted|assisting|advised|advising|answered|answering|analy[sz]ed|analy[sz]ing|"
+    r"built|building|collaborated|collaborating|communicated|communicating|conducted|conducting|"
+    r"configured|configuring|coordinated|coordinating|created|creating|debugged|debugging|"
+    r"delivered|delivering|designed|designing|developed|developing|diagnosed|diagnosing|"
+    r"documented|documenting|executed|executing|facilitated|facilitating|handled|handling|"
+    r"helped|helping|identified|identifying|implemented|implementing|improved|improving|"
+    r"instructed|instructing|investigated|investigating|led|maintained|maintaining|managed|managing|"
+    r"monitored|monitoring|negotiated|negotiating|operated|operating|organized|organizing|"
+    r"participated|participating|performed|performing|prepared|preparing|presented|presenting|"
+    r"processed|processing|provided|providing|recommended|recommending|resolved|resolving|"
+    r"responded|responding|reviewed|reviewing|scheduled|scheduling|supported|supporting|"
+    r"taught|teaching|tested|testing|trained|training|troubleshot|troubleshooting|"
+    r"worked|working|contributed|contributing|ensured|ensuring|guided|guiding|"
+    r"explained|explaining|demonstrated|demonstrating|achieved|met)\b",
 
 def _strip_bullet_prefix(line: str) -> str:
     return _BULLET_PREFIX_PATTERN.sub("", line).strip()

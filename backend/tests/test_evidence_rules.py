@@ -71,6 +71,23 @@ class EvidenceRuleTests(unittest.TestCase):
             "contextual",
         )
 
+    def test_short_english_cv_uses_verbatim_writing_sample(self):
+        short_cv = (
+            "Developed a mobile app that helps users monitor and improve their basic needs."
+        )
+        self.assertTrue(_looks_like_english_resume(short_cv))
+        evidence = _build_cv_evidence({}, short_cv)
+        samples = [item for item in evidence if item["type"] == "language_context"]
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0]["quote"], short_cv)
+        self.assertTrue(_quote_is_in_source(samples[0]["quote"], short_cv))
+
+    def test_extraction_prompt_requires_all_roles_not_only_latest_role(self):
+        from services.nlp_service import _CV_SYSTEM_PROMPT
+
+        self.assertIn("extract EVERY distinct work/experience", _CV_SYSTEM_PROMPT)
+        self.assertIn("Do not stop after the current or most recent job", _CV_SYSTEM_PROMPT)
+
     def test_github_tools_do_not_prove_networking(self):
         item = {
             "label": "Tools",

@@ -353,7 +353,10 @@ Classify information carefully:
 - skills: technical skills, frameworks, tools, programming languages, domain knowledge,
   and soft skills explicitly stated in the resume. Programming languages such as Python,
   Java, C++, JavaScript, SQL, or PHP belong in 'skills' as technical skills, not in
-  'languages'.
+  'languages'. Create one item for each distinct named skill, framework, database, or tool.
+  Do NOT collapse lists into umbrella items such as "Programming Languages", "Frameworks",
+  "Databases", or "Tools"; use actual names (for example, Java, Spring Boot, PostgreSQL,
+  and Git) and keep an exact source quote for each.
 - experience: employment, teaching jobs, internships, volunteer work, freelance roles,
   projects performed in a role, and other work experience. A job title, employer, or
   employment dates must NEVER be classified as education.
@@ -519,39 +522,66 @@ _ENGLISH_FUNCTION_WORDS = frozenset({
     "who", "where", "when", "while", "although", "because", "is", "are", "was",
     "were", "be", "been", "have", "has", "had", "will", "can", "do", "does",
     "did", "not", "into", "through", "during", "between", "within", "without",
-    "a", "in", "our", "their", "they", "we", "you", "it", "its", "these", "those", "also",
+    "a", "i", "in", "my", "our", "their", "they", "we", "you", "it", "its", "these", "those", "also",
     "by", "on", "at", "an", "or", "but", "if", "than", "then", "there", "about",
     "across", "over", "under", "as", "your", "how", "more", "such", "each",
 })
 
 
-def _looks_like_english_resume(text: str) -> bool:
-    """Detect a substantive English writing sample without requiring a long CV.
+_ENGLISH_DISTINCTIVE_WORDS = frozenset({
+    "the", "and", "with", "from", "that", "this", "which", "who", "where", "when",
+    "while", "although", "because", "was", "were", "been", "have", "has", "had",
+    "their", "they", "we", "you", "these", "those", "there", "about", "across",
+    "without", "through", "during", "between", "within", "our",
+})
 
-    This is used only to support a partial written-English signal. It must never
-    establish spoken proficiency or an excellent language level. Short resumes
-    often contain fewer than 80 words of prose, so the decision is based on an
-    actual source excerpt rather than a global word-count threshold.
+
+def _looks_like_english_resume(text: str) -> bool:
+    """Detect natural English across the full CV, for written-use evidence only.
+
+    PDF text extraction may split sentences into short lines or columns. Evaluate
+    the full text instead of requiring one individual 420-character chunk to
+    contain a high proportion of English function words. This can only support a
+    partial written-English signal, never spoken proficiency or an excellent level.
     """
-    return bool(_find_english_writing_sample(text))
+    words = re.findall(r"\b[a-z]+\b", text.casefold())
+    if len(words) < 35:
+        return False
+
+    common_words = [word for word in words if word in _ENGLISH_FUNCTION_WORDS]
+    distinctive_words = {word for word in words if word in _ENGLISH_DISTINCTIVE_WORDS}
+    return (
+        len(common_words) >= 6
+        and len(common_words) / len(words) >= 0.04
+        and len(distinctive_words) >= 2
+    )
 
 
 def _find_english_writing_sample(text: str) -> str:
-    """Find a substantive, verbatim English CV excerpt suitable as written evidence.
-
-    A short, coherent sentence is enough to show written use; headings and skill
-    lists alone do not qualify because they lack enough natural-language markers.
-    """
+    """Return a verbatim English CV excerpt, even when PDF layout split sentences."""
+    chunks = _chunk_raw_resume_text(text)
     candidates = []
-    for chunk in _chunk_raw_resume_text(text):
+    for chunk in chunks:
         words = re.findall(r"\b[a-z]+\b", chunk.casefold())
         common_words = sum(word in _ENGLISH_FUNCTION_WORDS for word in words)
-        if len(words) >= 10 and common_words >= 2 and common_words / len(words) >= 0.08:
-            candidates.append((common_words / len(words), common_words, len(chunk), chunk))
-    if not candidates:
-        return ""
-    candidates.sort(reverse=True)
-    return candidates[0][3]
+        distinctive_words = {
+            word for word in words if word in _ENGLISH_DISTINCTIVE_WORDS
+        }
+        if len(words) >= 8 and common_words >= 2 and common_words / len(words) >= 0.04:
+            candidates.append((common_words, len(words), len(distinctive_words), len(chunk), chunk))
+
+    if candidates:
+        return max(candidates, key=lambda item: (item[0], item[1], item[2], item[3]))[4]
+
+    # The overall CV has passed the English-language check. When PDF line breaks
+    # prevent any one window meeting the local threshold, keep the longest exact
+    # source window instead of silently dropping written-language evidence.
+    fallback = [
+        (len(re.findall(r"\b[a-z]+\b", chunk.casefold())), len(chunk), chunk)
+        for chunk in chunks
+    ]
+    fallback = [item for item in fallback if item[0] >= 8]
+    return max(fallback, key=lambda item: (item[0], item[1]))[2] if fallback else ""
 
 
 def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:

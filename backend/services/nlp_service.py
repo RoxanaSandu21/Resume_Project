@@ -1644,11 +1644,28 @@ def _education_requirement_matches(requirement_text: str, evidence_item: dict) -
 
 
 def _project_description_supports_requirement(requirement_text: str, evidence_item: dict) -> bool:
+    """Allow project evidence for general software/team capabilities, not specialist operations."""
     requirement = _normalized_for_grounding(requirement_text)
     quote = (evidence_item.get("quote") or "").casefold()
     if evidence_item.get("type") != "project_description":
         return False
-    if "software development" in requirement or "foundation" in requirement:
+
+    # A generic project/team reference must never satisfy a specialist infrastructure
+    # requirement. Those require evidence of the relevant technology or operation itself.
+    specialist_patterns = (
+        r"\bdevops\b",
+        r"\b(?:docker|kubernetes|rancher|portworx|containeri[sz]ation)\b",
+        r"\bcloud (?:administration|resources?)\b|\b(?:azure|aws|gcp|google cloud)\b",
+        r"\binfrastructure as code\b|\biac\b|\bterraform\b|\bansible\b|\barm templates?\b",
+        r"\b(?:networking concepts?|vnets?|subnets?|nsgs?|asgs?|route tables?|firewalls?)\b",
+        r"\b(?:monitoring alerts?|alerting|auto[- ]?heal|monitoring standards)\b",
+        r"\bsecurity vulnerabilit(?:y|ies)\b",
+        r"\b(?:build|deployment|release) automation\b|\bci/?cd\b",
+    )
+    if any(re.search(pattern, requirement, re.IGNORECASE) for pattern in specialist_patterns):
+        return False
+
+    if re.search(r"\b(?:software development|foundation|programming knowledge)\b", requirement):
         has_build_action = bool(re.search(
             r"\b(built|build|developed|designed|implemented|created|programmed)\b",
             quote,
@@ -1659,14 +1676,20 @@ def _project_description_supports_requirement(requirement_text: str, evidence_it
         ))
         if has_build_action and has_software_context:
             return True
-    if "team" in requirement and re.search(
+
+    # Accept explicit teamwork requirements, not every technical requirement that
+    # happens to mention a team (for example, "DevOps standards used by multiple teams").
+    is_general_team_requirement = bool(re.search(
+        r"\b(team environment|teamwork|team player|work in (?:an? )?team|"
+        r"work collaboratively|collaboration skills|collaborate with)\b",
+        requirement,
+    ))
+    if is_general_team_requirement and re.search(
         r"\b(team|collaborat|shared tasks|regular feedback)\b",
         quote,
     ):
         return True
     return False
-
-
 
 
 def _is_skill_or_project_only_evidence(item: dict) -> bool:
@@ -1707,18 +1730,27 @@ def _deterministic_requirement_assessment(
         if relevant:
             completed_degree_items = []
             degree_pattern = r"\b(bachelor(?:'s)?|bsc|b\.sc\.|bs degree|master(?:'s)?|msc|m\.sc\.)\b"
-            ongoing_pattern = r"\b(present|current|ongoing|in progress)\b"
+            ongoing_pattern = r"\b(present|current|ongoing|in progress|expected)\b"
+            faculty_program_pattern = r"\b(?:faculty|facultatea)\b.{0,100}\b(?:computer science|informatics|software|computing|information technology)\b"
+            university_pattern = r"\b(?:university|universitatea|universita)\b"
+            completed_date_range_pattern = r"\b(?:19|20)\d{2}\b.{0,60}\b(?:19|20)\d{2}\b"
+
             for item in relevant:
-                # Each individual education entry must establish both the relevant
-                # field and an explicitly named, completed degree. Do not combine
-                # an ongoing unrelated master's with a separate faculty entry.
                 item_text = f"{item.get('label', '')} {item.get('quote', '')}"
-                if (
-                    item.get("type") == "education"
-                    and re.search(degree_pattern, item_text, re.IGNORECASE)
-                    and not re.search(ongoing_pattern, item_text, re.IGNORECASE)
-                    and _education_requirement_matches(requirement_text, item)
+                if item.get("type") != "education" or re.search(
+                    ongoing_pattern, item_text, re.IGNORECASE
                 ):
+                    continue
+
+                explicitly_named_degree = bool(
+                    re.search(degree_pattern, item_text, re.IGNORECASE)
+                )
+                completed_university_program = (
+                    re.search(faculty_program_pattern, item_text, re.IGNORECASE)
+                    and re.search(university_pattern, item_text, re.IGNORECASE)
+                    and re.search(completed_date_range_pattern, item_text)
+                )
+                if explicitly_named_degree or completed_university_program:
                     completed_degree_items.append(item)
 
             if completed_degree_items:
@@ -1726,15 +1758,18 @@ def _deterministic_requirement_assessment(
                     "status": "matched",
                     "score": 85,
                     "evidence_ids": [item["id"] for item in completed_degree_items],
-                    "explanation": "The CV explicitly records a completed degree in the requested field of study.",
+                    "explanation": (
+                        "The CV records completed university study in the requested field; "
+                        "the faculty/program wording is accepted as equivalent degree evidence."
+                    ),
                 }
             return {
                 "status": "partial",
                 "score": 50,
                 "evidence_ids": [item["id"] for item in relevant],
                 "explanation": (
-                    "The CV shows study in Computer Science, but the excerpt does not explicitly "
-                    "confirm the completed degree requested."
+                    "The CV shows relevant study, but the available education entry does not "
+                    "establish a completed university qualification."
                 ),
             }
 
@@ -1945,9 +1980,14 @@ Evidence discipline:
 - Do not turn "used/mentioned a tool" into professional experience with it. An explicitly listed
   technology or a tool shown under a named project can support partial evidence that the candidate
   lists or has used that technology, but cannot prove requested years, production administration,
-  or professional depth. A concrete project description can support partial software-development
-  or teamwork evidence. Distinguish explicit skill listing, academic/project use, and professional
-  task experience in your explanation.
+A concrete project description can support partial evidence for general software-development
+  knowledge or a general teamwork requirement. Do not use a generic project/team description
+  to support specialist DevOps, cloud administration, containerization, infrastructure-as-code,
+  networking, monitoring/alerting, or security-vulnerability requirements. Those require
+  evidence of the relevant technology or operation itself.
+- For a degree requirement, accept a source-grounded completed university faculty/program
+  entry in the requested field as equivalent education evidence even when the CV does not use
+  the literal words "Bachelor" or "BSc". Do not treat an ongoing program as completed.
 - For language requirements, use explicit natural-language proficiency or evidence of using that
   language; programming languages are irrelevant. For certification requirements, require the
   named certification or clearly equivalent credential. For experience requirements, require
@@ -1976,6 +2016,59 @@ def _evidence_support_level(requirement_text: str, evidence_item: dict) -> str:
 
     def has_any(patterns: tuple[str, ...], value: str = evidence_text) -> bool:
         return any(re.search(pattern, value, re.IGNORECASE) for pattern in patterns)
+
+    # Specialist DevOps and infrastructure criteria need evidence of the
+    # technology/operation itself; generic teamwork or unrelated projects are insufficient.
+    if re.search(r"\bdevops\b", requirement):
+        devops_operations = (
+            r"\b(ci/?cd|continuous integration|continuous deployment)\b",
+            r"\b(build|deployment|release) pipeline\b",
+            r"\b(build|deployment|release) automation\b",
+            r"\b(docker|kubernetes|terraform|ansible|azure devops|aws|azure|gcp)\b",
+            r"\b(infrastructure as code|iac)\b",
+            r"\b(monitoring|alerting|alerts|auto[- ]?heal)\b",
+        )
+        return "direct" if has_any(devops_operations) else "none"
+
+    if re.search(r"\b(?:docker|kubernetes|rancher|portworx|containeri[sz]ation)\b", requirement):
+        return "direct" if has_any((
+            r"\b(docker|kubernetes|rancher|portworx|containeri[sz]ation)\b",
+        )) else "none"
+
+    if re.search(r"\bcloud (?:administration|resources?)\b|\b(?:azure|aws|gcp|google cloud)\b", requirement):
+        return "direct" if has_any((
+            r"\b(azure|aws|amazon web services|gcp|google cloud platform)\b",
+            r"\b(cloud administration|cloud infrastructure|cloud resources|ec2|s3|virtual machines?|vms|serverless)\b",
+        )) else "none"
+
+    if re.search(r"\binfrastructure as code\b|\biac\b|\bterraform\b|\bansible\b|\barm templates?\b", requirement):
+        return "direct" if has_any((
+            r"\b(terraform|ansible|arm templates?|infrastructure as code|iac|cloudformation|pulumi|bicep)\b",
+        )) else "none"
+
+    if re.search(r"\b(?:monitoring alerts?|alerting|auto[- ]?heal|monitoring standards)\b", requirement):
+        return "direct" if has_any((
+            r"\b(monitoring|alerting|alerts?|auto[- ]?heal|prometheus|grafana|datadog|new relic)\b",
+        )) else "none"
+
+    if re.search(r"\bsecurity vulnerabilit(?:y|ies)\b", requirement):
+        return "direct" if has_any((
+            r"\b(security vulnerabilit(?:y|ies)|vulnerability scanning|owasp|security fixes|"
+            r"security remediation|dependency scanning|static analysis)\b",
+        )) else "none"
+
+    if re.search(r"\b(problem[- ]solving|diagnostic skills?|analy[sz]e technical issues)\b", requirement):
+        return "direct" if has_any((
+            r"\b(problem[- ]solving|diagnos(ed|ing|is)|troubleshoot(ing|ed)?|"
+            r"investigated (?:and )?resolved|analy[sz]ed (?:and )?resolved|"
+            r"identified and fixed|debug(ged|ging)?)\b",
+        )) else "none"
+
+    if re.search(r"\b(adaptable|adaptability|action[- ]oriented|deal with change|changing requirements)\b", requirement):
+        return "direct" if has_any((
+            r"\b(adapt(ed|able|ability)|adjust(ed|ing) to change|changing requirements|"
+            r"rapidly changing|learn(ed|ing) new (?:tools|technologies|systems))\b",
+        )) else "none"
 
     if re.search(r"\benglish\b|language proficiency", requirement):
         explicitly_named = bool(re.search(r"\benglish\b", quote))

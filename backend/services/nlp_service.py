@@ -1665,6 +1665,29 @@ def _project_description_supports_requirement(requirement_text: str, evidence_it
     return False
 
 
+
+
+def _is_skill_or_project_only_evidence(item: dict) -> bool:
+    """Identify evidence that proves a named skill/project use, not professional tenure."""
+    evidence_type = item.get("type")
+    if evidence_type in {
+        "technical_skill", "domain_knowledge", "tool",
+        "project_technology", "project_description",
+    }:
+        return True
+
+    if evidence_type != "resume_text":
+        return False
+
+    quote = item.get("quote") or ""
+    for line in quote.splitlines():
+        cleaned = _strip_bullet_prefix(line.strip())
+        if _SKILL_SECTION_PATTERN.match(cleaned) or _PROJECT_TOOLS_PATTERN.match(cleaned):
+            return True
+    return False
+
+
+
 def _deterministic_requirement_assessment(
     requirement: dict,
     candidates: list[dict],
@@ -2219,10 +2242,7 @@ def calculate_hybrid_match_score(
                 if item["id"] in llm_ids and support_levels.get(item["id"]) in {"direct", "contextual"}
             ]
             only_skill_or_project_evidence = bool(llm_selected) and all(
-                item.get("type") in {
-                    "technical_skill", "domain_knowledge", "tool",
-                    "project_technology", "project_description",
-                }
+                _is_skill_or_project_only_evidence(item)
                 for item in llm_selected
             )
             should_override = (

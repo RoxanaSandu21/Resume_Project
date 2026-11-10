@@ -564,6 +564,82 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertEqual(assessment["status"], "partial")
         self.assertEqual(assessment["score"], 50)
 
+    def test_minimum_year_requirement_is_not_fully_matched_from_project_only_evidence(self):
+        cv_text = (
+            "Projects\n"
+            "DevOps CI/CD Demo\n"
+            "Built a CI/CD pipeline and configured monitoring alerts."
+        )
+        cv_data = {
+            "skills": [],
+            "experience": [],
+            "education": [],
+            "projects": [{
+                "name": "DevOps CI/CD Demo",
+                "description": [
+                    "Built a CI/CD pipeline and configured monitoring alerts."
+                ],
+                "technologies": [],
+                "evidence": (
+                    "DevOps CI/CD Demo\n"
+                    "Built a CI/CD pipeline and configured monitoring alerts."
+                ),
+            }],
+        }
+        requirement = {
+            "text": (
+                "Minimum of two years' hands-on experience in a DevOps practice "
+                "implementing build and deployment automation with monitoring alerts"
+            ),
+            "source_text": (
+                "Minimum of two years' hands-on experience in a DevOps practice "
+                "implementing build and deployment automation with monitoring alerts"
+            ),
+            "category": "experience",
+            "priority": "required",
+        }
+        project_evidence = {
+            "id": "E1",
+            "type": "project_description",
+            "label": "DevOps CI/CD Demo | Project",
+            "text": (
+                "DevOps CI/CD Demo. Built a CI/CD pipeline and configured monitoring alerts."
+            ),
+            "quote": "Built a CI/CD pipeline and configured monitoring alerts.",
+            "semantic_similarity": 0.8,
+        }
+
+        with patch(
+            "services.nlp_service.extract_job_information",
+            return_value={"requirements": [requirement]},
+        ):
+            with patch(
+                "services.nlp_service._retrieve_evidence",
+                return_value=([[project_evidence]], [0.8]),
+            ):
+                with patch(
+                    "services.nlp_service._llm_assess_requirements",
+                    return_value={
+                        0: {
+                            "requirement_index": 0,
+                            "status": "matched",
+                            "score": 90,
+                            "evidence_ids": ["E1"],
+                            "explanation": "The project demonstrates DevOps automation.",
+                        }
+                    },
+                ):
+                    result = calculate_hybrid_match_score(
+                        "DevOps Engineer",
+                        cv_text,
+                        cv_data=cv_data,
+                    )
+
+        detail = result["requirement_details"][0]
+        self.assertEqual(detail["status"], "partial")
+        self.assertEqual(detail["score"], 50)
+        self.assertIn("requested professional experience duration", detail["explanation"])
+
     def test_minimum_years_parser_handles_numeric_and_written_duration(self):
         self.assertTrue(_requirement_mentions_minimum_years("Minimum of two years' hands-on experience"))
         self.assertTrue(_requirement_mentions_minimum_years("At least 3 years experience with Terraform"))

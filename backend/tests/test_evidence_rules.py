@@ -367,12 +367,12 @@ class EvidenceRuleTests(unittest.TestCase):
 
     def test_coverage_metrics_distinguish_partial_from_fully_matched(self):
         metrics = _calculate_evidence_coverage([
-            {"status": "partial", "priority": "required", "evidence": [{"quote": "English CV text"}]},
-            {"status": "partial", "priority": "required", "evidence": [{"quote": "Business Sales Advisor"}]},
-            {"status": "missing", "priority": "required", "evidence": []},
-            {"status": "missing", "priority": "required", "evidence": []},
-            {"status": "missing", "priority": "required", "evidence": []},
-            {"status": "missing", "priority": "preferred", "evidence": []},
+            {"status": "partial", "score": 50, "priority": "required", "evidence": [{"quote": "English CV text"}]},
+            {"status": "partial", "score": 50, "priority": "required", "evidence": [{"quote": "Business Sales Advisor"}]},
+            {"status": "missing", "score": 0, "priority": "required", "evidence": []},
+            {"status": "missing", "score": 0, "priority": "required", "evidence": []},
+            {"status": "missing", "score": 0, "priority": "required", "evidence": []},
+            {"status": "missing", "score": 0, "priority": "preferred", "evidence": []},
         ])
         self.assertEqual(metrics["evidence_covered_count"], 2)
         self.assertEqual(metrics["requirements_total_count"], 6)

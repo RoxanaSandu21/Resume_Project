@@ -33,6 +33,7 @@ from services.nlp_service import (  # noqa: E402
     _recover_projects_from_source,
     _recover_education_from_source,
     _merge_source_grounded_projects,
+    _merge_source_grounded_education,
     _retrieve_evidence,
 )
 
@@ -673,6 +674,49 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertEqual(assessment["status"], "partial")
         self.assertEqual(assessment["score"], 50)
         self.assertEqual(assessment["evidence_ids"], ["E14"])
+
+    def test_education_merge_rejects_degree_name_not_present_in_source_quote(self):
+        source = (
+            "Education\n"
+            "Faculty of Computer Science Iasi Oct 2021 – July 2025\n"
+            "Alexandru Ioan Cuza University"
+        )
+        merged = _merge_source_grounded_education(
+            source,
+            [{
+                "qualification": "Bachelor's in Mathematics and Computer Science",
+                "institution": "Faculty of Computer Science Iasi",
+                "dates": "Oct 2021 – July 2025",
+                "evidence": (
+                    "Faculty of Computer Science Iasi Oct 2021 – July 2025\n"
+                    "Alexandru Ioan Cuza University"
+                ),
+            }],
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["qualification"], "Faculty of Computer Science Iasi")
+        self.assertEqual(merged[0]["institution"], "Alexandru Ioan Cuza University")
+        self.assertNotIn("Bachelor", merged[0]["qualification"])
+
+    def test_project_evidence_builder_keeps_description_and_named_tools_separate(self):
+        source = (
+            "Projects\n"
+            "iNeed - Mental Wellness App\n"
+            "◦ Developed a mobile app to monitor basic needs.\n"
+            "◦ Tools Used: React Native, Node.js, MongoDB"
+        )
+        projects = _recover_projects_from_source(source)
+        evidence = _build_cv_evidence({"projects": projects}, source)
+
+        descriptions = [item for item in evidence if item["type"] == "project_description"]
+        technologies = [item for item in evidence if item["type"] == "project_technology"]
+
+        self.assertEqual(len(descriptions), 1)
+        self.assertEqual(descriptions[0]["quote"], "Developed a mobile app to monitor basic needs.")
+        self.assertEqual(len(technologies), 1)
+        self.assertEqual(technologies[0]["skill_names"], ["React Native", "Node.js", "MongoDB"])
+        self.assertTrue(_quote_is_in_source(technologies[0]["quote"], source))
 
     def test_assessment_prompt_keeps_exact_evidence_text_without_duplicate_fields(self):
         requirement = {

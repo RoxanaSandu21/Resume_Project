@@ -24,6 +24,7 @@ from services.nlp_service import (  # noqa: E402
     _calculate_weighted_match_score,
     _chunk_raw_resume_text,
     _deterministic_requirement_assessment,
+    _is_skill_or_project_only_evidence,
     _evidence_support_level,
     _evidence_supports_requirement,
     _looks_like_english_resume,
@@ -621,6 +622,24 @@ class EvidenceRuleTests(unittest.TestCase):
             retrieved, _ = _retrieve_evidence(requirements, evidence_items)
 
         self.assertEqual([item["id"] for item in retrieved[0]], ["E11"])
+
+    def test_raw_resume_skill_and_tools_lines_cannot_prove_professional_tenure(self):
+        skill_excerpt = {
+            "type": "resume_text",
+            "quote": "Databases: SQL, MongoDB, Oracle Database, PostgreSQL",
+        }
+        project_tools_excerpt = {
+            "type": "resume_text",
+            "quote": "iNeed - Mobile App\n◦ Tools Used: React Native, Node.js, MongoDB",
+        }
+        professional_duty = {
+            "type": "experience_responsibility",
+            "quote": "Administered MongoDB clusters for a production service.",
+        }
+
+        self.assertTrue(_is_skill_or_project_only_evidence(skill_excerpt))
+        self.assertTrue(_is_skill_or_project_only_evidence(project_tools_excerpt))
+        self.assertFalse(_is_skill_or_project_only_evidence(professional_duty))
 
     def test_skill_list_can_support_partial_but_not_full_experience_match(self):
         evidence = [{

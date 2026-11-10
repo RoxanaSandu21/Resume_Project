@@ -23,7 +23,7 @@ from typing import Literal
 import fitz  # PyMuPDF
 import numpy as np
 from ollama import Client
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sentence_transformers import SentenceTransformer
 
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
@@ -114,6 +114,13 @@ class CVEducation(BaseModel):
     evidence: str = Field(description="An exact quote copied from the CV")
 
 
+class CVProject(BaseModel):
+    name: str
+    description: list[str] = Field(default_factory=list)
+    technologies: list[str] = Field(default_factory=list)
+    evidence: str = Field(description="An exact project excerpt copied from the CV")
+
+
 class CVCertification(BaseModel):
     name: str
     issuer: str
@@ -127,6 +134,7 @@ class CVExtraction(BaseModel):
     skills: list[CVSkill] = Field(default_factory=list)
     experience: list[CVExperience] = Field(default_factory=list)
     education: list[CVEducation] = Field(default_factory=list)
+    projects: list[CVProject] = Field(default_factory=list)
     certifications: list[CVCertification] = Field(default_factory=list)
     languages: list[CVSkill] = Field(default_factory=list)
 
@@ -194,7 +202,7 @@ def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: st
     # CV extraction returns the largest structured payload; allow enough output for complete JSON.
     default_limits = {
         "CVExtraction": 4096,
-        "JobExtraction": 1024,
+        "JobExtraction": 2048,
         "MatchAssessmentOutput": 1024,
     }
     env_names = {
@@ -305,10 +313,18 @@ def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: st
             schema_name,
             elapsed,
         )
-        raise RuntimeError(
-            "Could not use the local Ollama model. Check that Ollama is installed and running, "
-            f"and that the model '{OLLAMA_MODEL}' has been downloaded. Technical details: {exc}"
-        ) from exc
+        if isinstance(exc, ValidationError):
+            message = (
+                f"Ollama returned incomplete or invalid structured JSON for {schema_name}. "
+                "The model may have stopped before completing the requested schema. "
+                f"Technical details: {exc}"
+            )
+        else:
+            message = (
+                "Could not use the local Ollama model. Check that Ollama is installed and running, "
+                f"and that the model '{OLLAMA_MODEL}' has been downloaded. Technical details: {exc}"
+            )
+        raise RuntimeError(message) from exc
 
 
 def test_ollama_generation(timeout_seconds: float = 120.0) -> dict:
@@ -469,13 +485,20 @@ Classify information carefully:
 - education: formal degrees, diplomas, courses, and schools/universities attended. Do not
   infer that a degree proves a specific skill unless the resume explicitly provides evidence.
 - certifications: named professional certificates with any stated issuer/date.
+- projects: each distinct personal, academic, course, or side project in a Projects section.
+  Preserve its project name, each concrete description bullet, and every listed technology.
+  Projects are NOT employment entries, but they are important evidence of practical or
+  academic technology use. Do not omit this section.
 - languages: HUMAN/NATURAL languages only, such as English or Romanian, including any
   stated proficiency. Do not put programming languages here.
 - summary: a short factual summary supported by the resume.
 
-For every skill, experience, education item, certification, and human language, provide an
-'evidence' field copied VERBATIM from the resume. If no exact supporting quote can be
-provided, omit that item. Do not combine unrelated roles or degrees into one item.
+For every skill, experience, education item, certification, human language, and project,
+provide an 'evidence' field copied VERBATIM from the resume. For a project, the evidence
+must contain its project name and the supporting description/tools-used text. Each project
+description must be an exact source sentence or bullet; each technology must be explicitly
+listed in that project's evidence. If no exact supporting quote can be provided, omit that
+item. Do not combine unrelated roles, degrees, or projects into one item.
 
 EXPERIENCE EXTRACTION MUST BE EXHAUSTIVE:
 - Review the ENTIRE resume from beginning to end and extract EVERY distinct work/experience
@@ -929,6 +952,266 @@ def _merge_source_grounded_fallbacks(
     return merged_skills, merged_experience
 
 
+
+
+_PROJECT_TOOLS_PATTERN = re.compile(
+    r"^(?:tools used|technologies|technology stack|tech stack)\s*:\s*(?P<items>.*)$",
+    re.IGNORECASE,
+)
+
+
+def _recover_projects_from_source(source: str) -> list[dict]:
+    """Recover named projects, exact descriptions, and tool lists from a Projects section."""
+    lines = [line.strip() for line in source.splitlines() if line.strip()]
+    recovered: list[dict] = []
+    current: dict | None = None
+    in_projects = False
+
+    def finish_current() -> None:
+        nonlocal current
+        if current is None:
+            return
+        evidence = "\n".join(current["lines"]).strip()
+        if (
+            current["name"]
+            and evidence
+            and (current["description"] or current["technologies"])
+            and _quote_is_in_source(evidence, source)
+        ):
+            recovered.append({
+                "name": current["name"],
+                "description": current["description"],
+                "technologies": current["technologies"],
+                "evidence": evidence,
+            })
+        current = None
+
+    for index, line in enumerate(lines):
+        heading = _heading_kind(line)
+        if heading == "projects":
+            finish_current()
+            in_projects = True
+            continue
+        if heading is not None and in_projects:
+            finish_current()
+            in_projects = False
+            continue
+        if not in_projects:
+            continue
+
+        content = _strip_bullet_prefix(line)
+        is_bullet = bool(_BULLET_PREFIX_PATTERN.match(line))
+        tools_match = _PROJECT_TOOLS_PATTERN.match(content)
+        if is_bullet or tools_match:
+            if current is None:
+                continue
+            current["lines"].append(line)
+            if tools_match:
+                current["technologies"].extend(
+                    value.strip(" \t.;•◦")
+                    for value in re.split(r"\s*,\s*", tools_match.group("items"))
+                    if value.strip(" \t.;•◦")
+                )
+                current["last_was_tools"] = True
+            else:
+                if content:
+                    current["description"].append(content)
+                current["last_was_tools"] = False
+            continue
+
+        next_is_bullet = (
+            index + 1 < len(lines)
+            and bool(_BULLET_PREFIX_PATTERN.match(lines[index + 1]))
+        )
+        title_like = (
+            next_is_bullet
+            and len(content) <= 100
+            and len(content.split()) <= 10
+            and not re.search(r"[.!?;:]$", content)
+            and not _RESPONSIBILITY_START_PATTERN.match(content)
+        )
+        if current is None or current["last_was_tools"] or title_like:
+            finish_current()
+            project_name = re.sub(
+                r"\s+(?:github|demo)\s+\d+$",
+                "",
+                content,
+                flags=re.IGNORECASE,
+            ).strip()
+            if project_name:
+                current = {
+                    "name": project_name,
+                    "description": [],
+                    "technologies": [],
+                    "lines": [line],
+                    "last_was_tools": False,
+                }
+            continue
+
+        # A plain line following a bullet is usually a wrapped continuation.
+        current["lines"].append(line)
+        if current["description"]:
+            current["description"][-1] = f"{current['description'][-1]} {content}".strip()
+        current["last_was_tools"] = False
+
+    finish_current()
+
+    for project in recovered:
+        unique = []
+        seen = set()
+        for technology in project["technologies"]:
+            key = _skill_name_key(technology)
+            if key and key not in seen:
+                unique.append(technology)
+                seen.add(key)
+        project["technologies"] = unique
+    return recovered
+
+
+def _merge_source_grounded_projects(source: str, projects: list[dict]) -> list[dict]:
+    """Keep only source-backed LLM projects, then fill omissions from the Projects parser."""
+    merged: list[dict] = []
+
+    for raw in projects:
+        name = (raw.get("name") or "").strip()
+        evidence = (raw.get("evidence") or "").strip()
+        if (
+            not name
+            or not evidence
+            or not _quote_is_in_source(evidence, source)
+            or not _quote_is_in_source(name, evidence)
+        ):
+            continue
+        descriptions = [
+            value.strip()
+            for value in raw.get("description", []) or []
+            if isinstance(value, str)
+            and value.strip()
+            and _quote_is_in_source(value, source)
+            and _quote_is_in_source(value, evidence)
+        ]
+        technologies = [
+            value.strip()
+            for value in raw.get("technologies", []) or []
+            if isinstance(value, str)
+            and value.strip()
+            and _quote_is_in_source(value, source)
+            and _quote_is_in_source(value, evidence)
+        ]
+        if not descriptions and not technologies:
+            continue
+        merged.append({
+            "name": name,
+            "description": descriptions,
+            "technologies": technologies,
+            "evidence": evidence,
+        })
+
+    for recovered in _recover_projects_from_source(source):
+        key = _normalized_for_grounding(recovered["name"])
+        existing = next(
+            (
+                item for item in merged
+                if _normalized_for_grounding(item["name"]) == key
+            ),
+            None,
+        )
+        if existing is None:
+            merged.append(recovered)
+            continue
+        for field in ("description", "technologies"):
+            values = list(existing.get(field, []) or [])
+            seen = {_normalized_for_grounding(value) for value in values}
+            for value in recovered.get(field, []) or []:
+                normalized = _normalized_for_grounding(value)
+                if normalized and normalized not in seen:
+                    values.append(value)
+                    seen.add(normalized)
+            existing[field] = values
+        existing["evidence"] = recovered["evidence"]
+
+    return merged
+
+
+def _recover_education_from_source(source: str) -> list[dict]:
+    """Recover dated education entries without inventing degree names."""
+    lines = [line.strip() for line in source.splitlines() if line.strip()]
+    recovered: list[dict] = []
+    in_education = False
+
+    for index, line in enumerate(lines):
+        heading = _heading_kind(line)
+        if heading == "education":
+            in_education = True
+            continue
+        if heading is not None and in_education:
+            in_education = False
+            continue
+        if not in_education:
+            continue
+
+        date_match = _DATE_RANGE_PATTERN.search(line)
+        if not date_match:
+            continue
+        qualification = line[:date_match.start()].strip(" \t:|,;•·-–—")
+        if not qualification:
+            continue
+
+        institution = ""
+        if index + 1 < len(lines):
+            next_line = lines[index + 1]
+            if (
+                not _DATE_RANGE_PATTERN.search(next_line)
+                and _heading_kind(next_line) is None
+                and _looks_like_organization_line(next_line)
+            ):
+                institution = next_line
+        evidence = "\n".join(value for value in (line, institution) if value).strip()
+        recovered.append({
+            "qualification": qualification,
+            "institution": institution,
+            "dates": date_match.group(0),
+            "evidence": evidence,
+        })
+    return recovered
+
+
+def _merge_source_grounded_education(source: str, education: list[dict]) -> list[dict]:
+    """Reject fabricated education labels and restore the actual source line for each study entry."""
+    merged: list[dict] = []
+    for raw in education:
+        evidence = (raw.get("evidence") or "").strip()
+        if not evidence or not _quote_is_in_source(evidence, source):
+            continue
+        item = dict(raw)
+        for field in ("qualification", "institution", "dates"):
+            value = (item.get(field) or "").strip()
+            if value and not _quote_is_in_source(value, evidence):
+                item[field] = ""
+        if item.get("qualification") or item.get("institution"):
+            merged.append(item)
+
+    for recovered in _recover_education_from_source(source):
+        recovered_dates = _normalized_for_grounding(recovered["dates"])
+        existing = next(
+            (
+                item for item in merged
+                if recovered_dates
+                and _normalized_for_grounding(item.get("dates", "")) == recovered_dates
+            ),
+            None,
+        )
+        if existing is None:
+            merged.append(recovered)
+            continue
+        for field in ("qualification", "institution", "dates"):
+            if recovered.get(field):
+                existing[field] = recovered[field]
+        existing["evidence"] = recovered["evidence"]
+    return merged
+
+
+
 def extract_cv_information(cv_text: str) -> dict:
     if not cv_text or not cv_text.strip():
         raise ValueError("The resume text is empty.")
@@ -978,7 +1261,14 @@ def _extract_cv_cached(source: str) -> dict:
         ]
         experience.append(structured_item)
     skills, experience = _merge_source_grounded_fallbacks(source, skills, experience)
-    education = [x.model_dump() for x in extraction.education if _quote_is_in_source(x.evidence, source)]
+    education = _merge_source_grounded_education(
+        source,
+        [x.model_dump() for x in extraction.education],
+    )
+    projects = _merge_source_grounded_projects(
+        source,
+        [x.model_dump() for x in extraction.projects],
+    )
     certifications = [x.model_dump() for x in extraction.certifications if _quote_is_in_source(x.evidence, source)]
     # A language entry must be named in its own source quote. This prevents locations
     # such as "Iasi, Romania" from being misread as proof of Romanian proficiency.
@@ -1000,6 +1290,7 @@ def _extract_cv_cached(source: str) -> dict:
         "skills": skills,
         "experience": experience,
         "education": education,
+        "projects": projects,
         "certifications": certifications,
         "languages": languages,
     }
@@ -1163,6 +1454,7 @@ def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:
                 "label": name or "Resume skill evidence",
                 "text": f"{name}. {quote}" if name else quote,
                 "quote": quote,
+                "skill_names": [name] if name else [],
             })
 
     for experience in cv_data.get("experience", []):
@@ -1193,6 +1485,54 @@ def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:
                 "label": responsibility_label,
                 "text": f"{responsibility_label}. {responsibility_quote}",
                 "quote": responsibility_quote,
+            })
+
+    for project in cv_data.get("projects", []):
+        project_name = (project.get("name") or "").strip()
+        project_evidence = (project.get("evidence") or "").strip()
+        project_label = f"{project_name} | Project" if project_name else "Resume project evidence"
+        if not project_name or not project_evidence:
+            continue
+
+        for description in project.get("description", []) or []:
+            description_quote = (description or "").strip()
+            if (
+                not description_quote
+                or (cv_text and not _quote_is_in_source(description_quote, cv_text))
+                or not _quote_is_in_source(description_quote, project_evidence)
+            ):
+                continue
+            evidence_items.append({
+                "id": f"E{len(evidence_items) + 1}",
+                "type": "project_description",
+                "label": project_label,
+                "text": f"{project_name}. {description_quote}",
+                "quote": description_quote,
+            })
+
+        technology_line = next(
+            (
+                line.strip()
+                for line in project_evidence.splitlines()
+                if _PROJECT_TOOLS_PATTERN.match(_strip_bullet_prefix(line.strip()))
+            ),
+            "",
+        )
+        technologies = [
+            value.strip()
+            for value in project.get("technologies", []) or []
+            if isinstance(value, str) and value.strip()
+        ]
+        if technology_line and technologies and (
+            not cv_text or _quote_is_in_source(technology_line, cv_text)
+        ):
+            evidence_items.append({
+                "id": f"E{len(evidence_items) + 1}",
+                "type": "project_technology",
+                "label": f"{project_label} | Technologies used",
+                "text": f"{project_name}. {technology_line}",
+                "quote": technology_line,
+                "skill_names": technologies,
             })
 
     for field, kind, label_key in (
@@ -1250,6 +1590,15 @@ def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:
 
         existing = seen_quotes.get(key)
         if existing is not None:
+            if item.get("skill_names"):
+                names = list(existing.get("skill_names", []) or [])
+                seen_names = {_skill_name_key(name) for name in names}
+                for name in item["skill_names"]:
+                    normalized_name = _skill_name_key(name)
+                    if normalized_name and normalized_name not in seen_names:
+                        names.append(name)
+                        seen_names.add(normalized_name)
+                existing["skill_names"] = names
             if item.get("type") == "language_context":
                 existing["is_english_writing_sample"] = True
                 existing["language_context_label"] = item.get("label", "")
@@ -1262,6 +1611,166 @@ def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:
         deduplicated.append(item)
         seen_quotes[key] = item
     return deduplicated
+
+
+
+def _contains_skill_term(text: str, skill_name: str) -> bool:
+    """Match a named technology as a normalized whole phrase, not a substring."""
+    source = f" {_normalized_for_grounding(text)} "
+    target = _normalized_for_grounding(skill_name)
+    if not target:
+        return False
+    if f" {target} " in source:
+        return True
+    tokens = target.split()
+    while tokens and tokens[-1] in {"database", "db", "api", "framework", "library"}:
+        tokens.pop()
+    shortened = " ".join(tokens)
+    return bool(shortened and f" {shortened} " in source)
+
+
+def _education_requirement_matches(requirement_text: str, evidence_item: dict) -> bool:
+    requirement = _normalized_for_grounding(requirement_text)
+    evidence = _normalized_for_grounding(
+        f"{evidence_item.get('label', '')} {evidence_item.get('quote', '')}"
+    )
+    field_terms = (
+        "computer science", "programming", "informatics", "software development",
+        "software engineering", "information technology", "information systems", "computing",
+    )
+    return any(term in requirement and term in evidence for term in field_terms)
+
+
+def _project_description_supports_requirement(requirement_text: str, evidence_item: dict) -> bool:
+    requirement = _normalized_for_grounding(requirement_text)
+    quote = (evidence_item.get("quote") or "").casefold()
+    if evidence_item.get("type") != "project_description":
+        return False
+    if "software development" in requirement or "foundation" in requirement:
+        has_build_action = bool(re.search(
+            r"\b(built|build|developed|designed|implemented|created|programmed)\b",
+            quote,
+        ))
+        has_software_context = bool(re.search(
+            r"\b(application|app|web|mobile|software|game|simulator|program)\b",
+            quote,
+        ))
+        if has_build_action and has_software_context:
+            return True
+    if "team" in requirement and re.search(
+        r"\b(team|collaborat|shared tasks|regular feedback)\b",
+        quote,
+    ):
+        return True
+    return False
+
+
+def _deterministic_requirement_assessment(
+    requirement: dict,
+    candidates: list[dict],
+) -> dict | None:
+    """Recover conservative partial matches from explicit source-grounded CV evidence."""
+    requirement_text = f"{requirement.get('text', '')} {requirement.get('source_text', '')}"
+    category = requirement.get("category", "other")
+
+    if category == "education":
+        relevant = [
+            item for item in candidates
+            if item.get("type") in {"education", "resume_text"}
+            and _education_requirement_matches(requirement_text, item)
+        ]
+        if relevant:
+            joined = " ".join(
+                f"{item.get('label', '')} {item.get('quote', '')}"
+                for item in relevant
+            )
+            has_completed_degree = bool(re.search(
+                r"\b(bachelor(?:'s)?|bsc|b\.sc\.|bs degree|master(?:'s)?|msc|m\.sc\.)\b",
+                joined,
+                re.IGNORECASE,
+            )) and not bool(re.search(
+                r"\b(present|current|ongoing|in progress)\b",
+                joined,
+                re.IGNORECASE,
+            ))
+            if has_completed_degree:
+                return {
+                    "status": "matched",
+                    "score": 85,
+                    "evidence_ids": [item["id"] for item in relevant],
+                    "explanation": "The CV explicitly records a completed degree in the requested field of study.",
+                }
+            return {
+                "status": "partial",
+                "score": 50,
+                "evidence_ids": [item["id"] for item in relevant],
+                "explanation": (
+                    "The CV shows study in Computer Science, but the excerpt does not explicitly "
+                    "confirm the completed degree requested."
+                ),
+            }
+
+    matching_technology_items = []
+    matching_names: list[str] = []
+    for item in candidates:
+        names = item.get("skill_names", []) or []
+        if item.get("skill_name"):
+            names = list(names) + [item["skill_name"]]
+        for name in names:
+            if _contains_skill_term(requirement_text, name):
+                matching_technology_items.append(item)
+                if name not in matching_names:
+                    matching_names.append(name)
+                break
+
+    project_technology_items = [
+        item for item in matching_technology_items
+        if item.get("type") == "project_technology"
+    ]
+    skill_list_items = [
+        item for item in matching_technology_items
+        if item.get("type") in {"technical_skill", "domain_knowledge", "tool"}
+    ]
+    usable_technology_items = list(project_technology_items)
+    if category in {"technical_skill", "domain_knowledge"}:
+        usable_technology_items.extend(skill_list_items)
+    if usable_technology_items:
+        evidence_ids = list(dict.fromkeys(item["id"] for item in usable_technology_items))
+        names = ", ".join(matching_names[:4])
+        if project_technology_items:
+            explanation = (
+                f"The CV lists {names} in project/tool evidence, but does not establish the "
+                "requested duration or professional depth."
+            )
+        else:
+            explanation = (
+                f"The CV explicitly lists {names}, but the excerpt does not establish the "
+                "requested proficiency or experience level."
+            )
+        return {
+            "status": "partial",
+            "score": 50,
+            "evidence_ids": evidence_ids,
+            "explanation": explanation,
+        }
+
+    project_descriptions = [
+        item for item in candidates
+        if _project_description_supports_requirement(requirement_text, item)
+    ]
+    if project_descriptions:
+        return {
+            "status": "partial",
+            "score": 50,
+            "evidence_ids": [item["id"] for item in project_descriptions],
+            "explanation": (
+                "The CV describes relevant software project work, but does not establish every "
+                "part of the requested professional or Agile experience."
+            ),
+        }
+    return None
+
+
 
 def _retrieve_evidence(job_requirements: list[dict], evidence_items: list[dict]) -> tuple[list[list[dict]], list[float]]:
     if not job_requirements or not evidence_items:
@@ -1294,8 +1803,33 @@ def _retrieve_evidence(job_requirements: list[dict], evidence_items: list[dict])
             if float(row[idx]) >= RETRIEVAL_MIN_SIMILARITY
         ][:TOP_EVIDENCE_PER_REQUIREMENT]
 
-        requirement_text = job_requirements[requirement_index]["text"].casefold()
+        requirement = job_requirements[requirement_index]
+        requirement_text = f"{requirement['text']} {requirement['source_text']}".casefold()
         forced_indices: list[int] = []
+
+        category = requirement.get("category", "other")
+        for evidence_index, evidence_item in enumerate(evidence_items):
+            names = evidence_item.get("skill_names", []) or []
+            if evidence_item.get("skill_name"):
+                names = list(names) + [evidence_item["skill_name"]]
+            has_named_technology = any(
+                _contains_skill_term(requirement_text, name)
+                for name in names
+            )
+            if has_named_technology and (
+                evidence_item.get("type") == "project_technology"
+                or category in {"technical_skill", "domain_knowledge"}
+            ):
+                forced_indices.append(evidence_index)
+            if (
+                category == "education"
+                and evidence_item.get("type") in {"education", "resume_text"}
+                and _education_requirement_matches(requirement_text, evidence_item)
+            ):
+                forced_indices.append(evidence_index)
+            if _project_description_supports_requirement(requirement_text, evidence_item):
+                forced_indices.append(evidence_index)
+
         if "english" in requirement_text:
             if english_sample_index is not None:
                 forced_indices = [english_sample_index]
@@ -1523,6 +2057,21 @@ def _llm_assess_requirements(requirements: list[dict], retrieved: list[list[dict
     for assessment in result.assessments:
         if 0 <= assessment.requirement_index < len(requirements):
             by_index[assessment.requirement_index] = assessment.model_dump()
+
+    status_counts = {"matched": 0, "partial": 0, "missing": 0}
+    evidence_id_count = 0
+    for assessment in by_index.values():
+        status_counts[assessment["status"]] += 1
+        evidence_id_count += len(assessment.get("evidence_ids", []))
+    omitted = sorted(set(range(len(requirements))) - set(by_index))
+    print(
+        f"[NLP][{_CURRENT_REQUEST_ID.get()}] Match assessment summary: "
+        f"{len(by_index)}/{len(requirements)} requirements; "
+        f"matched={status_counts['matched']}, partial={status_counts['partial']}, "
+        f"missing={status_counts['missing']}; evidence_ids={evidence_id_count}; "
+        f"omitted_indexes={omitted}.",
+        flush=True,
+    )
     return by_index
 
 
@@ -1624,6 +2173,14 @@ def calculate_hybrid_match_score(
     requirements = job_data["requirements"]
     evidence_items = _build_cv_evidence(cv_data, cv_text)
     retrieved, best_similarities = _retrieve_evidence(requirements, evidence_items)
+    candidate_counts = [len(items) for items in retrieved]
+    print(
+        f"[NLP][{_CURRENT_REQUEST_ID.get()}] Evidence retrieval: "
+        f"{sum(candidate_counts)} candidate excerpts across {len(requirements)} requirements; "
+        f"requirements_with_candidates={sum(count > 0 for count in candidate_counts)}/"
+        f"{len(requirements)}; empty={sum(count == 0 for count in candidate_counts)}.",
+        flush=True,
+    )
 
     assessment_by_index: dict[int, dict] = {}
     scoring_method = "embedding_retrieval_and_local_llm_evidence_assessment"
@@ -1634,6 +2191,7 @@ def calculate_hybrid_match_score(
         scoring_method = "embedding_fallback_only"
 
     requirement_details = []
+    deterministic_override_count = 0
 
     for index, requirement in enumerate(requirements):
         candidates = retrieved[index]
@@ -1644,6 +2202,32 @@ def calculate_hybrid_match_score(
             item["id"]: _evidence_support_level(requirement["text"], item)
             for item in candidates
         }
+
+        rule_assessment = _deterministic_requirement_assessment(requirement, candidates)
+        if rule_assessment is not None:
+            llm_ids = (assessment or {}).get("evidence_ids", [])
+            llm_selected = [
+                item for item in candidates
+                if item["id"] in llm_ids and support_levels.get(item["id"]) in {"direct", "contextual"}
+            ]
+            only_skill_or_project_evidence = bool(llm_selected) and all(
+                item.get("type") in {
+                    "technical_skill", "domain_knowledge", "tool",
+                    "project_technology", "project_description",
+                }
+                for item in llm_selected
+            )
+            should_override = (
+                requirement.get("category") == "education"
+                or assessment is None
+                or assessment.get("status") == "missing"
+                or not llm_selected
+                or (assessment.get("status") == "matched" and only_skill_or_project_evidence)
+            )
+            if should_override:
+                assessment = rule_assessment
+                deterministic_override_count += 1
+
         valid_evidence_ids: list[str] = []
         status = "missing"
         score = 0
@@ -1799,6 +2383,13 @@ def calculate_hybrid_match_score(
             ],
             "explanation": explanation,
         })
+
+    if deterministic_override_count:
+        print(
+            f"[NLP][{_CURRENT_REQUEST_ID.get()}] Applied "
+            f"{deterministic_override_count} source-grounded deterministic evidence overrides.",
+            flush=True,
+        )
 
     final_score = _calculate_weighted_match_score(requirement_details)
     matched = [item["requirement"] for item in requirement_details if item["status"] == "matched"]

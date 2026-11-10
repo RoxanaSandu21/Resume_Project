@@ -28,6 +28,9 @@ from sentence_transformers import SentenceTransformer
 
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
 OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "900"))
+# Keep the local model resident between processing stages and repeated uploads.
+# This affects model loading only; it does not change generation settings or scoring.
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
 _ollama_client = Client(timeout=OLLAMA_TIMEOUT_SECONDS)
 EMBEDDING_MODEL = os.getenv(
     "EMBEDDING_MODEL",
@@ -240,6 +243,7 @@ def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: st
             ],
             format=schema.model_json_schema(),
             options={"temperature": 0, "num_predict": max_output_tokens},
+            keep_alive=OLLAMA_KEEP_ALIVE,
         )
         parsed = schema.model_validate_json(response.message.content)
         elapsed = time.perf_counter() - started
@@ -248,10 +252,28 @@ def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: st
         generation_speed = None
         if generated_tokens and generation_duration_ns:
             generation_speed = generated_tokens / (generation_duration_ns / 1_000_000_000)
+
+        prompt_tokens = getattr(response, "prompt_eval_count", None)
+        prompt_duration_ns = getattr(response, "prompt_eval_duration", None)
+        prompt_speed = None
+        if prompt_tokens and prompt_duration_ns:
+            prompt_speed = prompt_tokens / (prompt_duration_ns / 1_000_000_000)
+        model_load_ns = getattr(response, "load_duration", None)
         done_reason = getattr(response, "done_reason", None)
+
         metrics = []
+        if model_load_ns is not None:
+            metrics.append(f"model_load_seconds={model_load_ns / 1_000_000_000:.2f}")
+        if prompt_tokens is not None:
+            metrics.append(f"prompt_tokens={prompt_tokens}")
+        if prompt_duration_ns is not None:
+            metrics.append(f"prompt_eval_seconds={prompt_duration_ns / 1_000_000_000:.2f}")
+        if prompt_speed is not None:
+            metrics.append(f"prompt_tokens_per_second={prompt_speed:.2f}")
         if generated_tokens is not None:
             metrics.append(f"output_tokens={generated_tokens}")
+        if generation_duration_ns is not None:
+            metrics.append(f"generation_seconds={generation_duration_ns / 1_000_000_000:.2f}")
         if generation_speed is not None:
             metrics.append(f"generation_tokens_per_second={generation_speed:.2f}")
         if done_reason:
@@ -912,6 +934,21 @@ def extract_cv_information(cv_text: str) -> dict:
         raise ValueError("The resume text is empty.")
 
     source = _compact_text(cv_text)[:MAX_CV_CHARS]
+    cache_before = _extract_cv_cached.cache_info()
+    result = _extract_cv_cached(source)
+    cache_after = _extract_cv_cached.cache_info()
+    cache_result = "hit" if cache_after.hits > cache_before.hits else "miss"
+    print(
+        f"[NLP][{_CURRENT_REQUEST_ID.get()}] CV extraction cache: {cache_result} "
+        f"(hits={cache_after.hits}, misses={cache_after.misses}).",
+        flush=True,
+    )
+    return copy.deepcopy(result)
+
+
+@lru_cache(maxsize=32)
+def _extract_cv_cached(source: str) -> dict:
+    """Extract a CV once per exact normalized text within this backend process."""
     extraction = _ollama_extract(
         CVExtraction,
         _CV_SYSTEM_PROMPT,
@@ -1467,8 +1504,6 @@ def _llm_assess_requirements(requirements: list[dict], retrieved: list[list[dict
                     "type": item["type"],
                     "label": item["label"],
                     "text": item["text"],
-                    "source_quote": item["quote"],
-                    "retrieval_similarity": item["semantic_similarity"],
                 }
                 for item in candidates
             ],
@@ -1479,7 +1514,7 @@ def _llm_assess_requirements(requirements: list[dict], retrieved: list[list[dict
         _MATCH_SYSTEM_PROMPT,
         "Assess every requirement using only the candidate evidence supplied for it.\n"
         "Do not consider evidence listed under another requirement unless it is included here.\n\n"
-        f"DATA:\n{__import__('json').dumps(requirements_payload, ensure_ascii=False)}",
+        f"DATA:\n{__import__('json').dumps(requirements_payload, ensure_ascii=False, separators=(',', ':'))}",
     )
     assert isinstance(result, MatchAssessmentOutput)
 

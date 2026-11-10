@@ -411,10 +411,6 @@ class EvidenceRuleTests(unittest.TestCase):
             )
         )
 
-
-if __name__ == "__main__":
-    unittest.main()
-
     def test_assessment_prompt_keeps_exact_evidence_text_without_duplicate_fields(self):
         requirement = {
             "text": "Confidence in speaking to users directly",
@@ -446,7 +442,7 @@ if __name__ == "__main__":
             result = _llm_assess_requirements([requirement], [[evidence]])
 
         prompt = ollama_call.call_args.args[2]
-        payload = json.loads(prompt.split("DATA:\\n", 1)[1])
+        payload = json.loads(prompt.split("DATA:\n", 1)[1])
         candidate = payload[0]["candidate_evidence"][0]
 
         self.assertEqual(result[0]["status"], "partial")
@@ -487,3 +483,6 @@ if __name__ == "__main__":
         finally:
             _extract_cv_cached.cache_clear()
 
+
+if __name__ == "__main__":
+    unittest.main()

@@ -23,12 +23,16 @@ from services.nlp_service import (  # noqa: E402
     _calculate_evidence_coverage,
     _calculate_weighted_match_score,
     _chunk_raw_resume_text,
+    _deterministic_requirement_assessment,
     _evidence_support_level,
     _evidence_supports_requirement,
     _looks_like_english_resume,
     _merge_source_grounded_fallbacks,
     _quote_is_in_source,
     _recover_experience_from_source,
+    _recover_projects_from_source,
+    _recover_education_from_source,
+    _merge_source_grounded_projects,
     _retrieve_evidence,
 )
 
@@ -410,6 +414,212 @@ class EvidenceRuleTests(unittest.TestCase):
                 for chunk in chunks
             )
         )
+
+    def test_cv_prompt_explicitly_extracts_projects_separately(self):
+        from services.nlp_service import _CV_SYSTEM_PROMPT
+
+        self.assertIn("Projects are NOT employment entries", _CV_SYSTEM_PROMPT)
+        self.assertIn("Do not omit this section", _CV_SYSTEM_PROMPT)
+
+    def test_project_parser_recovers_all_project_descriptions_and_technologies(self):
+        source = (
+            "Education\n"
+            "Faculty of Computer Science Oct 2021 – July 2025\n"
+            "Alexandru Ioan Cuza University\n"
+            "Projects\n"
+            "Interview Management – Recruiter Support Web Application github 2\n"
+            "◦ Built a web application for recruiters to schedule and manage interviews.\n"
+            "◦ Tools Used: Java 21, Spring Boot, HTML, CSS, JavaScript\n"
+            "iNeed - Mental Wellness & Habit Tracking App demo 2\n"
+            "◦ Developed a mobile app for users to monitor their basic needs.\n"
+            "◦ Tools Used: React Native, Node.js, Express, MongoDB, TypeScript\n"
+            "Bubble Buster – Arcade Game github 2\n"
+            "◦ Created a game that simulates classic Bubble Shooter mechanics.\n"
+            "◦ Tools Used: Python, Pygame\n"
+            "Electronic Circuit Viewer\n"
+            "◦ Built a web application in C to explore electronic circuits.\n"
+            "Escape Room Game\n"
+            "◦ Worked in a small team to create a 3D escape room game.\n"
+            "◦ Tools Used: Unreal Engine 5, Blueprints"
+        )
+
+        projects = _recover_projects_from_source(source)
+        by_name = {item["name"]: item for item in projects}
+
+        self.assertEqual(len(projects), 5)
+        self.assertIn("MongoDB", by_name["iNeed - Mental Wellness & Habit Tracking App"]["technologies"])
+        self.assertIn("Python", by_name["Bubble Buster – Arcade Game"]["technologies"])
+        self.assertEqual(
+            by_name["Escape Room Game"]["description"],
+            ["Worked in a small team to create a 3D escape room game."],
+        )
+        self.assertTrue(all(_quote_is_in_source(item["evidence"], source) for item in projects))
+
+    def test_project_merge_fills_llm_omissions_without_inventing_content(self):
+        source = (
+            "Projects\n"
+            "Bubble Buster – Arcade Game\n"
+            "◦ Created a game using Python.\n"
+            "◦ Tools Used: Python, Pygame"
+        )
+        merged = _merge_source_grounded_projects(
+            source,
+            [{
+                "name": "Bubble Buster – Arcade Game",
+                "description": [],
+                "technologies": [],
+                "evidence": "Bubble Buster – Arcade Game",
+            }],
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["technologies"], ["Python", "Pygame"])
+        self.assertEqual(merged[0]["description"], ["Created a game using Python."])
+        self.assertTrue(_quote_is_in_source(merged[0]["evidence"], source))
+
+    def test_education_parser_does_not_invent_a_bachelor_degree(self):
+        source = (
+            "Education\n"
+            "Masters in Software Development Oct 2025 - present\n"
+            "Faculty of Economics and Business Administration\n"
+            "Faculty of Computer Science Iasi Oct 2021 – July 2025\n"
+            "Alexandru Ioan Cuza University\n"
+            "Experience\n"
+            "Junior Java Developer Sep 2025 – present\n"
+            "Endava"
+        )
+
+        recovered = _recover_education_from_source(source)
+        computer_science = next(
+            item for item in recovered
+            if "Computer Science" in item["qualification"]
+        )
+
+        self.assertEqual(computer_science["qualification"], "Faculty of Computer Science Iasi")
+        self.assertEqual(computer_science["institution"], "Alexandru Ioan Cuza University")
+        self.assertNotIn("Bachelor", computer_science["qualification"])
+        self.assertTrue(_quote_is_in_source(computer_science["evidence"], source))
+
+    def test_education_requirement_gets_partial_for_relevant_study_without_explicit_degree(self):
+        source = (
+            "Faculty of Computer Science Iasi Oct 2021 – July 2025\n"
+            "Alexandru Ioan Cuza University"
+        )
+        evidence = _build_cv_evidence(
+            {
+                "education": [{
+                    "qualification": "Faculty of Computer Science Iasi",
+                    "institution": "Alexandru Ioan Cuza University",
+                    "dates": "Oct 2021 – July 2025",
+                    "evidence": source,
+                }]
+            },
+            source,
+        )
+        assessment = _deterministic_requirement_assessment(
+            {
+                "text": "BS Degree in Computer Science or applicable programming area",
+                "source_text": "BS Degree in Computer Science or applicable programming area of study",
+                "category": "education",
+            },
+            evidence,
+        )
+
+        self.assertIsNotNone(assessment)
+        self.assertEqual(assessment["status"], "partial")
+        self.assertEqual(assessment["score"], 50)
+        self.assertTrue(assessment["evidence_ids"])
+
+    def test_project_technology_supports_partial_not_full_experience_match(self):
+        evidence = [{
+            "id": "E8",
+            "type": "project_technology",
+            "label": "iNeed | Project | Technologies used",
+            "text": "iNeed. Tools Used: React Native, Node.js, Express, MongoDB",
+            "quote": "◦ Tools Used: React Native, Node.js, Express, MongoDB",
+            "skill_names": ["React Native", "Node.js", "Express", "MongoDB"],
+        }]
+        assessment = _deterministic_requirement_assessment(
+            {
+                "text": "Experience working with SQL and NoSQL databases like Oracle, MySQL, Redis, PostgreSQL, MongoDB",
+                "source_text": "Experience working with SQL and NoSQL databases like Oracle, MySQL, Redis, PostgreSQL, MongoDB",
+                "category": "experience",
+            },
+            evidence,
+        )
+
+        self.assertEqual(assessment["status"], "partial")
+        self.assertEqual(assessment["score"], 50)
+        self.assertEqual(assessment["evidence_ids"], ["E8"])
+        self.assertIn("does not establish", assessment["explanation"])
+
+    def test_project_development_and_teamwork_can_support_partial_evidence(self):
+        evidence = [
+            {
+                "id": "E9",
+                "type": "project_description",
+                "label": "Interview Management | Project",
+                "text": "Interview Management. Built a web application for recruiters.",
+                "quote": "Built a web application for recruiters.",
+            },
+            {
+                "id": "E10",
+                "type": "project_description",
+                "label": "Escape Room Game | Project",
+                "text": "Escape Room Game. Worked in a small team to create a 3D escape room game.",
+                "quote": "Worked in a small team to create a 3D escape room game.",
+            },
+        ]
+
+        software_assessment = _deterministic_requirement_assessment(
+            {
+                "text": "Foundation of software development knowledge",
+                "source_text": "Foundation of software development knowledge",
+                "category": "experience",
+            },
+            evidence,
+        )
+        team_assessment = _deterministic_requirement_assessment(
+            {
+                "text": "Ability to work in an open and dynamic team environment",
+                "source_text": "Ability to work in an open and dynamic team environment",
+                "category": "experience",
+            },
+            evidence,
+        )
+
+        self.assertEqual(software_assessment["status"], "partial")
+        self.assertEqual(software_assessment["evidence_ids"], ["E9"])
+        self.assertEqual(team_assessment["status"], "partial")
+        self.assertEqual(team_assessment["evidence_ids"], ["E10"])
+
+    def test_retrieval_forces_exact_project_technology_overlap(self):
+        import numpy as np
+
+        requirements = [{
+            "text": "Experience working with MongoDB databases",
+            "source_text": "Experience working with MongoDB databases",
+            "category": "experience",
+        }]
+        evidence_items = [{
+            "id": "E11",
+            "type": "project_technology",
+            "label": "iNeed | Technologies used",
+            "text": "iNeed. Tools Used: React Native, Node.js, Express, MongoDB",
+            "quote": "Tools Used: React Native, Node.js, Express, MongoDB",
+            "skill_names": ["React Native", "Node.js", "Express", "MongoDB"],
+        }]
+
+        class ZeroSimilarityModel:
+            def encode(self, texts, **kwargs):
+                if len(texts) == len(requirements):
+                    return np.tile(np.array([[1.0, 0.0]]), (len(texts), 1))
+                return np.tile(np.array([[0.0, 1.0]]), (len(texts), 1))
+
+        with patch("services.nlp_service._get_embedding_model", return_value=ZeroSimilarityModel()):
+            retrieved, _ = _retrieve_evidence(requirements, evidence_items)
+
+        self.assertEqual([item["id"] for item in retrieved[0]], ["E11"])
 
     def test_assessment_prompt_keeps_exact_evidence_text_without_duplicate_fields(self):
         requirement = {

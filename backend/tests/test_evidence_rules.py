@@ -452,7 +452,7 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertEqual(candidate["text"], evidence["text"])
         self.assertIn(evidence["quote"], candidate["text"])
         self.assertNotIn("source_quote", candidate)
-        self.assertNotIn("retrieval_similarity", candidate)
+        self.assertEqual(candidate["retrieval_similarity"], evidence["semantic_similarity"])
 
     def test_identical_cv_uses_cached_extraction_without_mutating_cached_result(self):
         _extract_cv_cached.cache_clear()

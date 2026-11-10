@@ -1980,7 +1980,8 @@ Evidence discipline:
 - Do not turn "used/mentioned a tool" into professional experience with it. An explicitly listed
   technology or a tool shown under a named project can support partial evidence that the candidate
   lists or has used that technology, but cannot prove requested years, production administration,
-A concrete project description can support partial evidence for general software-development
+  or professional depth.
+- A concrete project description can support partial evidence for general software-development
   knowledge or a general teamwork requirement. Do not use a generic project/team description
   to support specialist DevOps, cloud administration, containerization, infrastructure-as-code,
   networking, monitoring/alerting, or security-vulnerability requirements. Those require

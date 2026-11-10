@@ -119,6 +119,61 @@ def fetch_jobs() -> list[dict[str, Any]] | None:
     return payload if isinstance(payload, list) else []
 
 
+def show_match_metrics(match_details: dict[str, Any], match_score: Any) -> None:
+    """Display the weighted score separately from evidence-coverage diagnostics."""
+    requirement_details = match_details.get("requirement_details") or []
+    matched = match_details.get("matched_skills") or []
+    partial = match_details.get("partial_requirements") or []
+    missing = match_details.get("missing_skills") or []
+    required_missing = match_details.get("required_missing") or []
+
+    total = int(
+        match_details.get("requirements_total_count")
+        or match_details.get("extracted_requirements_count")
+        or len(requirement_details)
+        or len(matched) + len(partial) + len(missing)
+    )
+    covered = int(
+        match_details.get(
+            "evidence_covered_count",
+            len(matched) + len(partial),
+        )
+    )
+    coverage_percent = float(
+        match_details.get(
+            "evidence_coverage_percent",
+            (covered / total * 100) if total else 0,
+        )
+    )
+    fully_matched = int(match_details.get("fully_matched_count", len(matched)))
+    required_missing_count = int(
+        match_details.get("required_missing_count", len(required_missing))
+    )
+    required_criteria_score = float(match_details.get("required_criteria_score", 0) or 0)
+    required_criteria_count = int(match_details.get("required_criteria_count", 0) or 0)
+
+    columns = st.columns(5)
+    columns[0].metric("Weighted compatibility", f"{float(match_score or 0):.2f}%")
+    columns[1].metric(
+        "Evidence coverage",
+        f"{covered}/{total}",
+        delta=f"{coverage_percent:.2f}%",
+    )
+    columns[2].metric("Fully matched", fully_matched)
+    columns[3].metric("Required without evidence", required_missing_count)
+    columns[4].metric(
+        "Required-only score",
+        f"{required_criteria_score:.2f}%",
+        help=f"Calculated over {required_criteria_count} required criteria; preferred criteria are excluded.",
+    )
+    st.caption(
+        "Evidence coverage is the share of requirements with at least one accepted "
+        "resume excerpt (matched or partial). The required-only score excludes optional "
+        "criteria. In the overall weighted score, preferred criteria have half the "
+        "weight of required criteria. Neither score is a hiring probability."
+    )
+
+
 # Fail early with actionable guidance if the backend process is not running.
 try:
     health_response = requests.get(f"{API_URL}/health/", timeout=CONNECT_TIMEOUT)
@@ -283,14 +338,12 @@ else:
                         f"Resume processed successfully for "
                         f"**{result.get('full_name', 'Unknown Candidate')}**."
                     )
+                    report = result.get("bias_report") or {}
+                    match_details = report.get("match_details") or {}
+                    show_match_metrics(match_details, result.get("match_score", 0))
+
                     left, right = st.columns(2)
                     with left:
-                        st.metric(
-                            "Compatibility score",
-                            f"{result.get('match_score', 0)}%",
-                        )
-                        report = result.get("bias_report") or {}
-                        match_details = report.get("match_details") or {}
                         st.subheader("Match Explanation")
                         st.write(match_details.get("explanation", "No explanation was returned."))
 
@@ -348,12 +401,13 @@ else:
                         f"#{rank} — {candidate.get('full_name', 'Unknown Candidate')} "
                         f"(Score: {score:.2f}%)"
                     ):
+                        match_details = (candidate.get("bias_report") or {}).get("match_details", {})
+                        show_match_metrics(match_details, score)
                         details_left, details_right = st.columns(2)
                         with details_left:
                             st.write(f"**Email:** {candidate.get('email') or 'Unspecified'}")
                             st.write(f"**Phone:** {candidate.get('phone') or 'Unspecified'}")
                             st.write(f"**Submitted:** {candidate.get('submitted_at') or 'Unknown'}")
-                            match_details = (candidate.get("bias_report") or {}).get("match_details", {})
                             st.write("**Matched requirements:**", match_details.get("matched_skills", []))
                             st.write("**Partial requirements:**", match_details.get("partial_requirements", []))
                             st.write("**Missing requirements:**", match_details.get("missing_skills", []))

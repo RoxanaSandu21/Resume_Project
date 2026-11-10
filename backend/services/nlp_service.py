@@ -2021,15 +2021,24 @@ def _evidence_support_level(requirement_text: str, evidence_item: dict) -> str:
     # Specialist DevOps and infrastructure criteria need evidence of the
     # technology/operation itself; generic teamwork or unrelated projects are insufficient.
     if re.search(r"\bdevops\b", requirement):
-        devops_operations = (
-            r"\b(ci/?cd|continuous integration|continuous deployment)\b",
-            r"\b(build|deployment|release) pipeline\b",
-            r"\b(build|deployment|release) automation\b",
-            r"\b(docker|kubernetes|terraform|ansible|azure devops|aws|azure|gcp)\b",
-            r"\b(infrastructure as code|iac)\b",
-            r"\b(monitoring|alerting|alerts|auto[- ]?heal)\b",
-        )
-        return "direct" if has_any(devops_operations) else "none"
+        requires_automation_practice = bool(re.search(
+            r"\b(automation|build|deployment|alerting|monitoring|pipeline)\b",
+            requirement,
+        ))
+        if requires_automation_practice:
+            devops_evidence = (
+                r"\b(ci/?cd|continuous integration|continuous deployment)\b",
+                r"\b(build|deployment|release) pipeline\b",
+                r"\b(build|deployment|release) automation\b",
+                r"\b(monitoring|alerting|alerts|auto[- ]?heal|prometheus|grafana|datadog)\b",
+            )
+        else:
+            devops_evidence = (
+                r"\b(docker|kubernetes|terraform|ansible|azure devops|aws|azure|gcp)\b",
+                r"\b(infrastructure as code|iac)\b",
+                r"\b(ci/?cd|continuous integration|continuous deployment|pipeline)\b",
+            )
+        return "direct" if has_any(devops_evidence) else "none"
 
     if re.search(r"\b(?:docker|kubernetes|rancher|portworx|containeri[sz]ation)\b", requirement):
         return "direct" if has_any((
@@ -2202,6 +2211,18 @@ def _llm_assess_requirements(requirements: list[dict], retrieved: list[list[dict
     return by_index
 
 
+
+def _requirement_mentions_minimum_years(requirement_text: str) -> bool:
+    """Detect explicit minimum experience-duration constraints in job wording."""
+    return bool(re.search(
+        r"\b(?:minimum(?: of)?|at least)?\s*"
+        r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)"
+        r"\s*(?:\+|plus)?\s+years?\b",
+        requirement_text,
+        re.IGNORECASE,
+    ))
+
+
 def _fallback_assessment(best_similarity: float) -> tuple[str, int, str]:
     """Fallback used only if the local LLM cannot assess retrieved evidence."""
     if best_similarity >= 0.68:
@@ -2331,16 +2352,17 @@ def calculate_hybrid_match_score(
         }
 
         rule_assessment = _deterministic_requirement_assessment(requirement, candidates)
+        llm_ids = (assessment or {}).get("evidence_ids", [])
+        llm_selected = [
+            item for item in candidates
+            if item["id"] in llm_ids and support_levels.get(item["id"]) in {"direct", "contextual"}
+        ]
+        only_skill_or_project_evidence = bool(llm_selected) and all(
+            _is_skill_or_project_only_evidence(item)
+            for item in llm_selected
+        )
+
         if rule_assessment is not None:
-            llm_ids = (assessment or {}).get("evidence_ids", [])
-            llm_selected = [
-                item for item in candidates
-                if item["id"] in llm_ids and support_levels.get(item["id"]) in {"direct", "contextual"}
-            ]
-            only_skill_or_project_evidence = bool(llm_selected) and all(
-                _is_skill_or_project_only_evidence(item)
-                for item in llm_selected
-            )
             should_override = (
                 requirement.get("category") == "education"
                 or assessment is None
@@ -2351,6 +2373,26 @@ def calculate_hybrid_match_score(
             if should_override:
                 assessment = rule_assessment
                 deterministic_override_count += 1
+        elif (
+            assessment is not None
+            and assessment.get("status") == "matched"
+            and _requirement_mentions_minimum_years(
+                f"{requirement.get('text', '')} {requirement.get('source_text', '')}"
+            )
+            and only_skill_or_project_evidence
+        ):
+            # Project/tool usage can be relevant, but cannot prove a requested
+            # minimum number of professional experience years.
+            assessment = {
+                "status": "partial",
+                "score": 50,
+                "evidence_ids": [item["id"] for item in llm_selected],
+                "explanation": (
+                    "The CV shows relevant project or listed-technology use, but does not "
+                    "establish the requested professional experience duration."
+                ),
+            }
+            deterministic_override_count += 1
 
         valid_evidence_ids: list[str] = []
         status = "missing"

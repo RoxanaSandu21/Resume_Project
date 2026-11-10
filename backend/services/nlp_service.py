@@ -1504,6 +1504,7 @@ def _llm_assess_requirements(requirements: list[dict], retrieved: list[list[dict
                     "type": item["type"],
                     "label": item["label"],
                     "text": item["text"],
+                    "retrieval_similarity": item["semantic_similarity"],
                 }
                 for item in candidates
             ],

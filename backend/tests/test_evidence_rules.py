@@ -621,6 +621,59 @@ class EvidenceRuleTests(unittest.TestCase):
 
         self.assertEqual([item["id"] for item in retrieved[0]], ["E11"])
 
+    def test_skill_list_can_support_partial_but_not_full_experience_match(self):
+        evidence = [{
+            "id": "E12",
+            "type": "technical_skill",
+            "label": "MongoDB",
+            "text": "MongoDB. Databases: SQL, MongoDB, Oracle Database, PostgreSQL",
+            "quote": "Databases: SQL, MongoDB, Oracle Database, PostgreSQL",
+            "skill_names": ["SQL", "MongoDB", "Oracle Database", "PostgreSQL"],
+        }]
+        assessment = _deterministic_requirement_assessment(
+            {
+                "text": "Minimum two years' experience working with MongoDB",
+                "source_text": "Minimum two years' experience working with MongoDB",
+                "category": "experience",
+            },
+            evidence,
+        )
+
+        self.assertEqual(assessment["status"], "partial")
+        self.assertEqual(assessment["score"], 50)
+        self.assertEqual(assessment["evidence_ids"], ["E12"])
+        self.assertIn("does not establish", assessment["explanation"])
+
+    def test_unrelated_completed_degree_cannot_upgrade_computer_science_study_to_full_match(self):
+        evidence = [
+            {
+                "id": "E13",
+                "type": "education",
+                "label": "Masters in Business Administration",
+                "text": "Masters in Business Administration Oct 2020 – May 2022",
+                "quote": "Masters in Business Administration Oct 2020 – May 2022",
+            },
+            {
+                "id": "E14",
+                "type": "education",
+                "label": "Faculty of Computer Science",
+                "text": "Faculty of Computer Science Oct 2021 – July 2025",
+                "quote": "Faculty of Computer Science Oct 2021 – July 2025",
+            },
+        ]
+        assessment = _deterministic_requirement_assessment(
+            {
+                "text": "BS Degree in Computer Science",
+                "source_text": "BS Degree in Computer Science",
+                "category": "education",
+            },
+            evidence,
+        )
+
+        self.assertEqual(assessment["status"], "partial")
+        self.assertEqual(assessment["score"], 50)
+        self.assertEqual(assessment["evidence_ids"], ["E14"])
+
     def test_assessment_prompt_keeps_exact_evidence_text_without_duplicate_fields(self):
         requirement = {
             "text": "Confidence in speaking to users directly",

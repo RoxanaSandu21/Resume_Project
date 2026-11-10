@@ -24,6 +24,7 @@ from services.nlp_service import (  # noqa: E402
     _calculate_weighted_match_score,
     _chunk_raw_resume_text,
     _deterministic_requirement_assessment,
+    _requirement_mentions_minimum_years,
     _is_skill_or_project_only_evidence,
     _evidence_support_level,
     _evidence_supports_requirement,
@@ -562,6 +563,11 @@ class EvidenceRuleTests(unittest.TestCase):
 
         self.assertEqual(assessment["status"], "partial")
         self.assertEqual(assessment["score"], 50)
+
+    def test_minimum_years_parser_handles_numeric_and_written_duration(self):
+        self.assertTrue(_requirement_mentions_minimum_years("Minimum of two years' hands-on experience"))
+        self.assertTrue(_requirement_mentions_minimum_years("At least 3 years experience with Terraform"))
+        self.assertFalse(_requirement_mentions_minimum_years("Strong scripting skills and teamwork"))
 
     def test_unrelated_team_project_does_not_support_devops_automation_experience(self):
         requirement = {

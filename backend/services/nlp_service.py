@@ -1680,24 +1680,27 @@ def _deterministic_requirement_assessment(
             and _education_requirement_matches(requirement_text, item)
         ]
         if relevant:
-            joined = " ".join(
-                f"{item.get('label', '')} {item.get('quote', '')}"
-                for item in relevant
-            )
-            has_completed_degree = bool(re.search(
-                r"\b(bachelor(?:'s)?|bsc|b\.sc\.|bs degree|master(?:'s)?|msc|m\.sc\.)\b",
-                joined,
-                re.IGNORECASE,
-            )) and not bool(re.search(
-                r"\b(present|current|ongoing|in progress)\b",
-                joined,
-                re.IGNORECASE,
-            ))
-            if has_completed_degree:
+            completed_degree_items = []
+            degree_pattern = r"\b(bachelor(?:'s)?|bsc|b\.sc\.|bs degree|master(?:'s)?|msc|m\.sc\.)\b"
+            ongoing_pattern = r"\b(present|current|ongoing|in progress)\b"
+            for item in relevant:
+                # Each individual education entry must establish both the relevant
+                # field and an explicitly named, completed degree. Do not combine
+                # an ongoing unrelated master's with a separate faculty entry.
+                item_text = f"{item.get('label', '')} {item.get('quote', '')}"
+                if (
+                    item.get("type") == "education"
+                    and re.search(degree_pattern, item_text, re.IGNORECASE)
+                    and not re.search(ongoing_pattern, item_text, re.IGNORECASE)
+                    and _education_requirement_matches(requirement_text, item)
+                ):
+                    completed_degree_items.append(item)
+
+            if completed_degree_items:
                 return {
                     "status": "matched",
                     "score": 85,
-                    "evidence_ids": [item["id"] for item in relevant],
+                    "evidence_ids": [item["id"] for item in completed_degree_items],
                     "explanation": "The CV explicitly records a completed degree in the requested field of study.",
                 }
             return {
@@ -1731,9 +1734,9 @@ def _deterministic_requirement_assessment(
         item for item in matching_technology_items
         if item.get("type") in {"technical_skill", "domain_knowledge", "tool"}
     ]
-    usable_technology_items = list(project_technology_items)
-    if category in {"technical_skill", "domain_knowledge"}:
-        usable_technology_items.extend(skill_list_items)
+    # A named skill can support a partial result even when the job describes it
+    # as experience; it must never establish professional duration or depth alone.
+    usable_technology_items = list(project_technology_items) + skill_list_items
     if usable_technology_items:
         evidence_ids = list(dict.fromkeys(item["id"] for item in usable_technology_items))
         names = ", ".join(matching_names[:4])
@@ -1816,10 +1819,9 @@ def _retrieve_evidence(job_requirements: list[dict], evidence_items: list[dict])
                 _contains_skill_term(requirement_text, name)
                 for name in names
             )
-            if has_named_technology and (
-                evidence_item.get("type") == "project_technology"
-                or category in {"technical_skill", "domain_knowledge"}
-            ):
+            if has_named_technology and evidence_item.get("type") in {
+                "technical_skill", "domain_knowledge", "tool", "project_technology"
+            }:
                 forced_indices.append(evidence_index)
             if (
                 category == "education"
@@ -1902,7 +1904,9 @@ Evidence discipline:
 - Every matched/partial assessment must cite one or more supplied evidence IDs whose actual text
   supports the claim. Never cite merely the closest semantic result; never invent IDs.
 - A title, employer, degree name, or generic summary alone cannot prove a specific skill, task,
-  proficiency, or behavior. Use the role's detailed duties only when those duties appear in evidence.
+  proficiency, or behavior. For an education requirement, however, a source-grounded qualification
+  and field of study are relevant evidence; do not invent a degree name, degree level, or completion.
+  Use the role's detailed duties only when those duties appear in evidence.
   Evaluate separately supplied experience-responsibility excerpts as well as role headings;
   responsibility excerpts must remain associated with the role from which they were extracted.
 - A programming-language list does not establish proficiency in a human language such as English.
@@ -1913,8 +1917,12 @@ Evidence discipline:
   prove IT service-desk or technical support experience. Software debugging, bug fixing, and
   application issue resolution can be transferable troubleshooting context, but do not by
   themselves prove work in an IT support, help-desk, or service-desk environment.
-- Do not turn "used/mentioned a tool" into professional experience with it. Distinguish explicit
-  skill listing, academic/project use, and professional task experience in your explanation.
+- Do not turn "used/mentioned a tool" into professional experience with it. An explicitly listed
+  technology or a tool shown under a named project can support partial evidence that the candidate
+  lists or has used that technology, but cannot prove requested years, production administration,
+  or professional depth. A concrete project description can support partial software-development
+  or teamwork evidence. Distinguish explicit skill listing, academic/project use, and professional
+  task experience in your explanation.
 - For language requirements, use explicit natural-language proficiency or evidence of using that
   language; programming languages are irrelevant. For certification requirements, require the
   named certification or clearly equivalent credential. For experience requirements, require

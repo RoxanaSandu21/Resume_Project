@@ -217,6 +217,7 @@ def upload_cv(job_id: int, file: UploadFile = File(...), db: Session = Depends(g
             "skills": cv_data.get("skills", []),
             "experience": cv_data.get("experience", []),
             "education": cv_data.get("education", []),
+            "projects": cv_data.get("projects", []),
             "certifications": cv_data.get("certifications", []),
             "languages": cv_data.get("languages", []),
         },

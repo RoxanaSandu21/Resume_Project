@@ -720,16 +720,20 @@ class EvidenceRuleTests(unittest.TestCase):
                 vector = [1.0, 0.0] if self.calls == 1 else [0.0, 1.0]
                 return np.tile(np.array([vector]), (len(texts), 1))
 
-        with (
-            patch("services.nlp_service.extract_job_information", return_value={"requirements": requirements}),
-            patch("services.nlp_service._llm_assess_requirements", return_value={}),
-            patch("services.nlp_service._get_embedding_model", return_value=OrthogonalSimilarityModel()),
+        with patch(
+            "services.nlp_service.extract_job_information",
+            return_value={"requirements": requirements},
         ):
-            result = calculate_hybrid_match_score(
-                "Test IT support job",
-                cv_text,
-                cv_data=cv_data,
-            )
+            with patch("services.nlp_service._llm_assess_requirements", return_value={}):
+                with patch(
+                    "services.nlp_service._get_embedding_model",
+                    return_value=OrthogonalSimilarityModel(),
+                ):
+                    result = calculate_hybrid_match_score(
+                        "Test IT support job",
+                        cv_text,
+                        cv_data=cv_data,
+                    )
 
         self.assertEqual(result["score"], 18.18)
         self.assertEqual(result["evidence_covered_count"], 2)

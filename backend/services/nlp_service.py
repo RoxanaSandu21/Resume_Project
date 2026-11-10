@@ -253,7 +253,6 @@ def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: st
             options={"temperature": 0, "num_predict": max_output_tokens},
             keep_alive=OLLAMA_KEEP_ALIVE,
         )
-        parsed = schema.model_validate_json(response.message.content)
         elapsed = time.perf_counter() - started
         generated_tokens = getattr(response, "eval_count", None)
         generation_duration_ns = getattr(response, "eval_duration", None)
@@ -288,17 +287,20 @@ def _ollama_extract(schema: type[BaseModel], system_prompt: str, user_prompt: st
             metrics.append(f"done_reason={done_reason}")
         metrics_text = "; " + ", ".join(metrics) if metrics else ""
         print(
-            f"[NLP][{request_id}] Finished Ollama task '{schema_name}' "
+            f"[NLP][{request_id}] Ollama generation completed for '{schema_name}' "
             f"in {elapsed:.1f} seconds{metrics_text}.",
             flush=True,
         )
         logger.info(
-            "[NLP][%s] Finished Ollama task '%s' in %.1f seconds%s.",
+            "[NLP][%s] Ollama generation completed for '%s' in %.1f seconds%s.",
             request_id,
             schema_name,
             elapsed,
             metrics_text,
         )
+        # Parse only after recording generation metrics so invalid/truncated JSON
+        # still leaves prompt, generation, and stop-reason diagnostics in the log.
+        parsed = schema.model_validate_json(response.message.content)
         return parsed
     except Exception as exc:
         elapsed = time.perf_counter() - started

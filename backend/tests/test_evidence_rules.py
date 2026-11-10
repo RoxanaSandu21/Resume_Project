@@ -35,7 +35,9 @@ from services.nlp_service import (  # noqa: E402
     _recover_education_from_source,
     _merge_source_grounded_projects,
     _merge_source_grounded_education,
+    _recover_skills_from_source,
     _retrieve_evidence,
+    calculate_hybrid_match_score,
 )
 
 
@@ -640,6 +642,113 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertTrue(_is_skill_or_project_only_evidence(skill_excerpt))
         self.assertTrue(_is_skill_or_project_only_evidence(project_tools_excerpt))
         self.assertFalse(_is_skill_or_project_only_evidence(professional_duty))
+
+    def test_it_support_style_requirements_keep_previous_conservative_outcome_with_projects(self):
+        import numpy as np
+
+        cv_text = (
+            "Roxana Alexandra Sandu\n"
+            "Education\n"
+            "Faculty of Computer Science Iasi Oct 2021 – July 2025\n"
+            "Alexandru Ioan Cuza University\n"
+            "Experience\n"
+            "Business Sales Advisor Feb 2025 – Sep 2025\n"
+            "Vodafone\n"
+            "Mathematics and Computer Science Teacher Dec 2021 – June 2024\n"
+            "Matematica.md\n"
+            "Technologies\n"
+            "Databases: SQL, MongoDB, Oracle Database, PostgreSQL\n"
+            "Projects\n"
+            "Interview Management – Recruiter Support Web Application\n"
+            "◦ Built a web application for recruiters to schedule and manage interviews.\n"
+            "◦ Tools Used: Java, Spring Boot, HTML, CSS, JavaScript\n"
+            "Escape Room Game\n"
+            "◦ Worked in a small team to create a 3D escape room game with shared tasks and regular feedback.\n"
+            "◦ Tools Used: Unreal Engine 5, Blueprints"
+        )
+        requirements = [
+            {
+                "text": "Excellent understanding of English spoken and written",
+                "source_text": "Excellent understanding of English spoken and written",
+                "category": "language",
+                "priority": "required",
+            },
+            {
+                "text": "Confidence in speaking to users directly",
+                "source_text": "Confidence in speaking to users directly",
+                "category": "experience",
+                "priority": "required",
+            },
+            {
+                "text": "Troubleshooting experience in a support environment",
+                "source_text": "Troubleshooting experience in a support environment",
+                "category": "experience",
+                "priority": "required",
+            },
+            {
+                "text": "Ability to work under pressure",
+                "source_text": "Ability to work under pressure",
+                "category": "other",
+                "priority": "required",
+            },
+            {
+                "text": "Basic networking skills",
+                "source_text": "Basic networking skills",
+                "category": "technical_skill",
+                "priority": "required",
+            },
+            {
+                "text": "Basic Audio Visual knowledge",
+                "source_text": "Basic Audio Visual knowledge",
+                "category": "domain_knowledge",
+                "priority": "preferred",
+            },
+        ]
+        cv_data = {
+            "skills": _recover_skills_from_source(cv_text),
+            "experience": _recover_experience_from_source(cv_text),
+            "education": _merge_source_grounded_education(cv_text, []),
+            "projects": _recover_projects_from_source(cv_text),
+        }
+
+        class OrthogonalSimilarityModel:
+            def __init__(self):
+                self.calls = 0
+
+            def encode(self, texts, **kwargs):
+                self.calls += 1
+                vector = [1.0, 0.0] if self.calls == 1 else [0.0, 1.0]
+                return np.tile(np.array([vector]), (len(texts), 1))
+
+        with (
+            patch("services.nlp_service.extract_job_information", return_value={"requirements": requirements}),
+            patch("services.nlp_service._llm_assess_requirements", return_value={}),
+            patch("services.nlp_service._get_embedding_model", return_value=OrthogonalSimilarityModel()),
+        ):
+            result = calculate_hybrid_match_score(
+                "Test IT support job",
+                cv_text,
+                cv_data=cv_data,
+            )
+
+        self.assertEqual(result["score"], 18.18)
+        self.assertEqual(result["evidence_covered_count"], 2)
+        self.assertCountEqual(
+            result["partial_requirements"],
+            [
+                "Excellent understanding of English spoken and written",
+                "Confidence in speaking to users directly",
+            ],
+        )
+        self.assertCountEqual(
+            result["missing_skills"],
+            [
+                "Troubleshooting experience in a support environment",
+                "Ability to work under pressure",
+                "Basic networking skills",
+                "Basic Audio Visual knowledge",
+            ],
+        )
 
     def test_skill_list_can_support_partial_but_not_full_experience_match(self):
         evidence = [{

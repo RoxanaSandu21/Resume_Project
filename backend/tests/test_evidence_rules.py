@@ -1,8 +1,10 @@
 """Regression tests for conservative resume evidence handling."""
 
+import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
@@ -10,6 +12,13 @@ if str(BACKEND_DIR) not in sys.path:
 
 from services.nlp_service import (  # noqa: E402
     _build_cv_evidence,
+    CVExtraction,
+    CVSkill,
+    MatchAssessmentOutput,
+    RequirementAssessment,
+    _extract_cv_cached,
+    _llm_assess_requirements,
+    extract_cv_information,
     PRIORITY_WEIGHTS,
     _calculate_evidence_coverage,
     _calculate_weighted_match_score,
@@ -405,3 +414,76 @@ class EvidenceRuleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_assessment_prompt_keeps_exact_evidence_text_without_duplicate_fields(self):
+        requirement = {
+            "text": "Confidence in speaking to users directly",
+            "source_text": "Confidence in speaking to users directly;",
+            "priority": "required",
+            "category": "experience",
+        }
+        evidence = {
+            "id": "E7",
+            "type": "experience",
+            "label": "Business Sales Advisor — Vodafone",
+            "text": "Business Sales Advisor — Vodafone. Business Sales Advisor Feb 2025 – Sep 2025",
+            "quote": "Business Sales Advisor Feb 2025 – Sep 2025",
+            "semantic_similarity": 0.2703,
+        }
+        fake_result = MatchAssessmentOutput(
+            assessments=[
+                RequirementAssessment(
+                    requirement_index=0,
+                    status="partial",
+                    score=50,
+                    evidence_ids=["E7"],
+                    explanation="People-facing experience is transferable but not direct IT support.",
+                )
+            ]
+        )
+
+        with patch("services.nlp_service._ollama_extract", return_value=fake_result) as ollama_call:
+            result = _llm_assess_requirements([requirement], [[evidence]])
+
+        prompt = ollama_call.call_args.args[2]
+        payload = json.loads(prompt.split("DATA:\\n", 1)[1])
+        candidate = payload[0]["candidate_evidence"][0]
+
+        self.assertEqual(result[0]["status"], "partial")
+        self.assertEqual(candidate["id"], evidence["id"])
+        self.assertEqual(candidate["type"], evidence["type"])
+        self.assertEqual(candidate["label"], evidence["label"])
+        self.assertEqual(candidate["text"], evidence["text"])
+        self.assertIn(evidence["quote"], candidate["text"])
+        self.assertNotIn("source_quote", candidate)
+        self.assertNotIn("retrieval_similarity", candidate)
+
+    def test_identical_cv_uses_cached_extraction_without_mutating_cached_result(self):
+        _extract_cv_cached.cache_clear()
+        fake_extraction = CVExtraction(
+            full_name="Roxana Sandu",
+            summary="Software development experience.",
+            skills=[
+                CVSkill(
+                    name="Python",
+                    category="technical_skill",
+                    evidence="Skills: Python",
+                )
+            ],
+            experience=[],
+            education=[],
+            certifications=[],
+            languages=[],
+        )
+
+        try:
+            with patch("services.nlp_service._ollama_extract", return_value=fake_extraction) as ollama_call:
+                first = extract_cv_information("Skills: Python")
+                first["skills"].clear()
+                second = extract_cv_information("Skills: Python")
+
+            self.assertEqual(ollama_call.call_count, 1)
+            self.assertEqual([item["name"] for item in second["skills"]], ["Python"])
+        finally:
+            _extract_cv_cached.cache_clear()
+

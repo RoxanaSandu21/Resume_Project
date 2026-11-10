@@ -504,7 +504,7 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertNotIn("Bachelor", computer_science["qualification"])
         self.assertTrue(_quote_is_in_source(computer_science["evidence"], source))
 
-    def test_education_requirement_gets_partial_for_relevant_study_without_explicit_degree(self):
+    def test_completed_computer_science_faculty_program_matches_bachelors_requirement(self):
         source = (
             "Faculty of Computer Science Iasi Oct 2021 – July 2025\n"
             "Alexandru Ioan Cuza University"
@@ -530,9 +530,81 @@ class EvidenceRuleTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(assessment)
+        self.assertEqual(assessment["status"], "matched")
+        self.assertEqual(assessment["score"], 85)
+        self.assertTrue(assessment["evidence_ids"])
+        self.assertIn("equivalent degree evidence", assessment["explanation"])
+
+    def test_ongoing_computer_science_faculty_program_remains_partial(self):
+        source = (
+            "Faculty of Computer Science Iasi Oct 2025 – present\n"
+            "Alexandru Ioan Cuza University"
+        )
+        evidence = _build_cv_evidence(
+            {
+                "education": [{
+                    "qualification": "Faculty of Computer Science Iasi",
+                    "institution": "Alexandru Ioan Cuza University",
+                    "dates": "Oct 2025 – present",
+                    "evidence": source,
+                }]
+            },
+            source,
+        )
+        assessment = _deterministic_requirement_assessment(
+            {
+                "text": "BS Degree in Computer Science",
+                "source_text": "BS Degree in Computer Science",
+                "category": "education",
+            },
+            evidence,
+        )
+
         self.assertEqual(assessment["status"], "partial")
         self.assertEqual(assessment["score"], 50)
-        self.assertTrue(assessment["evidence_ids"])
+
+    def test_unrelated_team_project_does_not_support_devops_automation_experience(self):
+        requirement = {
+            "text": (
+                "Minimum of two years' hands-on experience as a part of a DevOps practice "
+                "implementing end-to-end automation for build, deployment, alerting, and monitoring"
+            ),
+            "source_text": (
+                "Minimum of two years' hands-on experience as a part of a DevOps practice "
+                "implementing end-to-end automation for build, deployment, alerting, and monitoring"
+            ),
+            "category": "experience",
+        }
+        escape_room = {
+            "id": "E20",
+            "type": "project_description",
+            "label": "Escape Room Game | Project",
+            "text": "Worked in a small team to create a 3D escape room game.",
+            "quote": "Worked in a small team to create a 3D escape room game.",
+        }
+
+        self.assertEqual(_evidence_support_level(requirement["text"], escape_room), "none")
+        self.assertIsNone(_deterministic_requirement_assessment(requirement, [escape_room]))
+
+    def test_devops_technology_evidence_can_support_relevance_but_not_claim_years(self):
+        evidence = [{
+            "id": "E21",
+            "type": "project_technology",
+            "label": "CI/CD project | Technologies used",
+            "text": "Tools Used: Docker, Kubernetes",
+            "quote": "Tools Used: Docker, Kubernetes",
+            "skill_names": ["Docker", "Kubernetes"],
+        }]
+        requirement = {
+            "text": "Minimum two years' experience with Docker running in Kubernetes",
+            "source_text": "Minimum two years' experience with Docker running in Kubernetes",
+            "category": "experience",
+        }
+
+        assessment = _deterministic_requirement_assessment(requirement, evidence)
+        self.assertEqual(assessment["status"], "partial")
+        self.assertEqual(assessment["score"], 50)
+        self.assertIn("does not establish", assessment["explanation"])
 
     def test_project_technology_supports_partial_not_full_experience_match(self):
         evidence = [{

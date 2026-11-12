@@ -1850,6 +1850,16 @@ def _deterministic_requirement_assessment(
             and _evidence_support_level(requirement.get("text", ""), item) == "direct"
         ]
         if direct_support_items:
+            if _requirement_mentions_minimum_years(requirement_text):
+                return {
+                    "status": "partial",
+                    "score": 60,
+                    "evidence_ids": [item["id"] for item in direct_support_items],
+                    "explanation": (
+                        "The CV describes troubleshooting in a support role, but the evidence does not "
+                        "establish the minimum duration requested."
+                    ),
+                }
             return {
                 "status": "matched",
                 "score": 80,

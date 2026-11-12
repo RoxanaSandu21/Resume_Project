@@ -2226,8 +2226,8 @@ def _evidence_support_level(requirement_text: str, evidence_item: dict) -> str:
             r"\b(incident management|support tickets|support environment|helpdesk)\b",
         ))
         has_troubleshooting_task = has_any((
-            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is)|automated system diagnostics|"
-            r"resolved (technical )?(issues|incidents|tickets)|investigated (technical )?(issues|incidents|tickets))\b",
+            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is)|automated system diagnostics)\b",
+            r"\b(resolved|investigated)\b.{0,60}\b(technical )?(issues|incidents|tickets)\b",
         ))
         if has_support_environment and has_troubleshooting_task:
             return "direct"

@@ -615,6 +615,57 @@ def _recover_skills_from_source(source: str) -> list[dict]:
     return recovered
 
 
+def _skill_name_appears_in_text(text: str, skill_name: str) -> bool:
+    """Check that a named skill is actually present in its own evidence quote."""
+    name = (skill_name or "").strip()
+    if not name:
+        return False
+    escaped = re.escape(name)
+    escaped = re.sub(r"\\\s+", r"\\s+", escaped)
+    pattern = rf"(?<![A-Za-z0-9_+#.]){escaped}(?![A-Za-z0-9_+#.])"
+    return bool(re.search(pattern, text or "", re.IGNORECASE))
+
+
+def _repair_skill_evidence(source: str, skills: list[dict]) -> list[dict]:
+    """Attach each extracted skill to a source line that actually names it."""
+    source_lines = [line.strip() for line in source.splitlines() if line.strip()]
+    indexed_lines = []
+    section = None
+    for line in source_lines:
+        heading = _heading_kind(line)
+        if heading is not None:
+            section = heading
+        indexed_lines.append((line, section))
+
+    repaired = []
+    seen = set()
+    for raw in skills:
+        item = dict(raw)
+        name = (item.get("name") or "").strip()
+        key = _skill_name_key(name)
+        if not key or key in seen:
+            continue
+        evidence = (item.get("evidence") or "").strip()
+        if not _quote_is_in_source(evidence, source) or not _skill_name_appears_in_text(evidence, name):
+            matches = [
+                line for line, line_section in indexed_lines
+                if line_section in {"skills", "technical skills", "core skills"}
+                and _skill_name_appears_in_text(line, name)
+            ]
+            if not matches:
+                matches = [
+                    line for line, _ in indexed_lines
+                    if _skill_name_appears_in_text(line, name)
+                ]
+            if not matches:
+                continue
+            evidence = matches[0]
+        item["evidence"] = evidence
+        repaired.append(item)
+        seen.add(key)
+    return repaired
+
+
 def _heading_kind(line: str) -> str | None:
     normalized = re.sub(r"[^a-z ]", "", line.casefold()).strip()
     normalized = re.sub(r"\s+", " ", normalized)
@@ -1243,12 +1294,14 @@ def _extract_cv_cached(source: str) -> dict:
     assert isinstance(extraction, CVExtraction)
 
     # Ground every extracted list item in the actual CV text to reduce hallucinated facts.
-    skills = [
-        x.model_dump()
-        for x in extraction.skills
-        if _quote_is_in_source(x.evidence, source)
-        and _normalized_for_grounding(x.name) not in _BROAD_SKILL_LABELS
-    ]
+    skills = _repair_skill_evidence(
+        source,
+        [
+            x.model_dump()
+            for x in extraction.skills
+            if _normalized_for_grounding(x.name) not in _BROAD_SKILL_LABELS
+        ],
+    )
     experience = []
     for item in extraction.experience:
         if not _quote_is_in_source(item.evidence, source):
@@ -1773,6 +1826,39 @@ def _deterministic_requirement_assessment(
                 ),
             }
 
+    if "english" in requirement_text.casefold():
+        explicit_language_items = [
+            item for item in candidates
+            if item.get("type") == "language"
+            and _evidence_support_level(requirement.get("text", ""), item) == "direct"
+        ]
+        if explicit_language_items:
+            return {
+                "status": "partial",
+                "score": 60,
+                "evidence_ids": [item["id"] for item in explicit_language_items],
+                "explanation": (
+                    "The CV explicitly states an English proficiency level, but does not "
+                    "separately establish every spoken and written criterion requested."
+                ),
+            }
+
+    if "troubleshoot" in requirement_text.casefold() or "support environment" in requirement_text.casefold():
+        direct_support_items = [
+            item for item in candidates
+            if item.get("type") in {"experience", "experience_responsibility"}
+            and _evidence_support_level(requirement.get("text", ""), item) == "direct"
+        ]
+        if direct_support_items:
+            return {
+                "status": "matched",
+                "score": 80,
+                "evidence_ids": [item["id"] for item in direct_support_items],
+                "explanation": (
+                    "The CV describes troubleshooting tasks within a named IT support or service-desk role."
+                ),
+            }
+
     matching_technology_items = []
     matching_names: list[str] = []
     for item in candidates:
@@ -1893,8 +1979,15 @@ def _retrieve_evidence(job_requirements: list[dict], evidence_items: list[dict])
                 forced_indices.append(evidence_index)
 
         if "english" in requirement_text:
+            # Keep explicit language proficiency evidence; a generic writing sample
+            # must not replace a structured English declaration.
+            forced_indices = [
+                index for index, item in enumerate(evidence_items)
+                if item.get("type") == "language"
+                and _evidence_support_level(requirement.get("text", ""), item) == "direct"
+            ]
             if english_sample_index is not None:
-                forced_indices = [english_sample_index]
+                forced_indices.append(english_sample_index)
         elif (
             "speak" in requirement_text
             or "communication" in requirement_text
@@ -2128,12 +2221,18 @@ def _evidence_support_level(requirement_text: str, evidence_item: dict) -> str:
         return "none"
 
     if "troubleshoot" in requirement or "support environment" in requirement:
-        if has_any((
+        has_support_environment = has_any((
             r"\b(service desk|help desk|technical support|it support|user support|customer support)\b",
-            r"\b(incident management|logged incidents|support tickets|resolved (technical )?(issues|incidents|tickets))\b",
-            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is))\b.{0,80}\b(user|customer|client|support|incident|ticket)\b",
-        )):
+            r"\b(incident management|support tickets|support environment|helpdesk)\b",
+        ))
+        has_troubleshooting_task = has_any((
+            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is)|automated system diagnostics|"
+            r"resolved (technical )?(issues|incidents|tickets)|investigated (technical )?(issues|incidents|tickets))\b",
+        ))
+        if has_support_environment and has_troubleshooting_task:
             return "direct"
+        if has_support_environment:
+            return "contextual"
         if has_any((
             r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is)|debug(ged|ging)?)\b",
             r"\b(fixed (software )?bugs?|resolved (software )?(issues?|bugs?|errors?)|"
@@ -2363,12 +2462,18 @@ def calculate_hybrid_match_score(
         )
 
         if rule_assessment is not None:
+            rule_evidence_ids = set(rule_assessment.get("evidence_ids", []))
+            llm_selected_ids = {item["id"] for item in llm_selected}
             should_override = (
                 requirement.get("category") == "education"
                 or assessment is None
                 or assessment.get("status") == "missing"
                 or not llm_selected
                 or (assessment.get("status") == "matched" and only_skill_or_project_evidence)
+                or (
+                    bool(rule_evidence_ids)
+                    and not rule_evidence_ids.intersection(llm_selected_ids)
+                )
             )
             if should_override:
                 assessment = rule_assessment

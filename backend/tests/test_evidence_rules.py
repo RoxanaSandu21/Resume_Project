@@ -3,6 +3,7 @@
 import json
 import sys
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1202,20 +1203,31 @@ class EvidenceRuleTests(unittest.TestCase):
             "quote": "Automated system diagnostics and OS performance troubleshooting using PowerShell.",
             "semantic_similarity": 0.12,
         }
-        with (
-            patch("services.nlp_service.extract_job_information", return_value={"requirements": [requirement]}),
-            patch("services.nlp_service._build_cv_evidence", return_value=[evidence]),
-            patch("services.nlp_service._retrieve_evidence", return_value=([[evidence]], [0.12])),
-            patch("services.nlp_service._llm_assess_requirements", return_value={
-                0: {
-                    "requirement_index": 0,
-                    "status": "missing",
-                    "score": 0,
-                    "evidence_ids": [],
-                    "explanation": "No evidence selected.",
-                }
-            }),
-        ):
+        with ExitStack() as stack:
+            stack.enter_context(patch(
+                "services.nlp_service.extract_job_information",
+                return_value={"requirements": [requirement]},
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._build_cv_evidence",
+                return_value=[evidence],
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._retrieve_evidence",
+                return_value=([[evidence]], [0.12]),
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._llm_assess_requirements",
+                return_value={
+                    0: {
+                        "requirement_index": 0,
+                        "status": "missing",
+                        "score": 0,
+                        "evidence_ids": [],
+                        "explanation": "No evidence selected.",
+                    }
+                },
+            ))
             result = calculate_hybrid_match_score(
                 "Troubleshooting experience in a support environment",
                 "Service Desk Analyst. Automated system diagnostics and OS performance troubleshooting using PowerShell.",

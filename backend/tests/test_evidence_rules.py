@@ -1123,6 +1123,39 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertEqual(result["score"], 80)
         self.assertEqual(result["evidence_ids"], ["E1"])
 
+    def test_support_troubleshooting_does_not_prove_requested_years_alone(self):
+        requirement = {
+            "text": "At least 2 years of troubleshooting experience in a support environment",
+            "source_text": "At least 2 years of troubleshooting experience in a support environment",
+            "category": "experience",
+        }
+        evidence = [{
+            "id": "E1",
+            "type": "experience_responsibility",
+            "label": "Service Desk Analyst — SCC | Responsibility",
+            "quote": "Automated system diagnostics and OS performance troubleshooting using PowerShell.",
+        }]
+        result = _deterministic_requirement_assessment(requirement, evidence)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["score"], 60)
+
+    def test_explicit_english_level_can_be_used_without_llm_selected_evidence(self):
+        requirement = {
+            "text": "Excellent understanding of English – spoken and written",
+            "source_text": "Excellent understanding of English – spoken and written",
+            "category": "language",
+        }
+        evidence = [{
+            "id": "E1",
+            "type": "language",
+            "label": "English",
+            "quote": "English — Fluent",
+        }]
+        result = _deterministic_requirement_assessment(requirement, evidence)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["score"], 60)
+        self.assertEqual(result["evidence_ids"], ["E1"])
+
     def test_explicit_english_proficiency_is_not_hidden_by_cv_writing_sample(self):
         import numpy as np
 

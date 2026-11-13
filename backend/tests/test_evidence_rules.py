@@ -1304,6 +1304,16 @@ class EvidenceRuleTests(unittest.TestCase):
             first["technologies"],
             ["CAN bus", "TouchGFX", "STM32CubeIDE", "FreeRTOS"],
         )
+        evidence = _build_cv_evidence({"projects": projects}, source)
+        technology_evidence = [
+            item for item in evidence if item["type"] == "project_technology"
+        ]
+        self.assertEqual(len(technology_evidence), 1)
+        self.assertEqual(
+            technology_evidence[0]["skill_names"],
+            ["CAN bus", "TouchGFX", "STM32CubeIDE", "FreeRTOS"],
+        )
+        self.assertTrue(_quote_is_in_source(technology_evidence[0]["quote"], source))
         self.assertTrue(_quote_is_in_source(first["evidence"], source))
 
 

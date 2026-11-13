@@ -1621,14 +1621,21 @@ def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:
                 "quote": description_quote,
             })
 
+        project_lines = project_evidence.splitlines()
         technology_line = next(
             (
                 line.strip()
-                for line in project_evidence.splitlines()
+                for line in project_lines
                 if _PROJECT_TOOLS_PATTERN.match(_strip_bullet_prefix(line.strip()))
             ),
             "",
         )
+        if not technology_line:
+            for line_index, line in enumerate(project_lines[:-1]):
+                if _heading_kind(line.strip()) == "technologies":
+                    # Preserve the exact technology-list line as the evidence quote.
+                    technology_line = project_lines[line_index + 1].strip()
+                    break
         technologies = [
             value.strip()
             for value in project.get("technologies", []) or []

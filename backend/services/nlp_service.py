@@ -2604,6 +2604,28 @@ def calculate_hybrid_match_score(
             else:
                 status, score = "missing", 0
                 valid_evidence_ids = []
+
+            # A bare level such as "English — Fluent" does not separately prove
+            # both spoken and written ability when the job explicitly asks for both.
+            requirement_lower = requirement["text"].casefold()
+            explicit_quote = " ".join(
+                item.get("quote", "").casefold()
+                for item in candidates
+                if item.get("id") in valid_evidence_ids
+            )
+            asks_spoken_and_written = (
+                "spoken" in requirement_lower and "written" in requirement_lower
+            )
+            proves_both_modes = (
+                bool(re.search(r"\\b(spoken|speaking)\\b", explicit_quote))
+                and bool(re.search(r"\\b(written|writing)\\b", explicit_quote))
+            )
+            if status == "matched" and asks_spoken_and_written and not proves_both_modes:
+                status, score = "partial", 60
+                explanation = (
+                    "The CV states an English proficiency level, but does not separately "
+                    "confirm both spoken and written ability as requested."
+                )
         elif "english" in requirement["text"].casefold() and english_context is not None:
             valid_evidence_ids = [english_context["id"]]
             status, score = "partial", 50

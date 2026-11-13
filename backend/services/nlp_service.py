@@ -621,7 +621,7 @@ def _skill_name_appears_in_text(text: str, skill_name: str) -> bool:
     if not name:
         return False
     escaped = re.escape(name)
-    escaped = re.sub(r"\\\s+", r"\\s+", escaped)
+    escaped = re.sub(r"\\s+", r"\s+", escaped)
     pattern = rf"(?<![A-Za-z0-9_+#.]){escaped}(?![A-Za-z0-9_+#.])"
     return bool(re.search(pattern, text or "", re.IGNORECASE))
 
@@ -891,7 +891,7 @@ def _deduplicate_responsibility_fragments(responsibilities: list[str]) -> list[s
     for value in responsibilities:
         if not isinstance(value, str):
             continue
-        value = re.sub(r"\\s+", " ", value).strip()
+        value = re.sub(r"\s+", " ", value).strip()
         if value and _normalized_for_grounding(value):
             cleaned.append(value)
 
@@ -1086,7 +1086,7 @@ def _recover_projects_from_source(source: str) -> list[dict]:
             technology_line = lines[index + 1].strip()
             technology_values = [
                 value.strip(" \\t.;•◦")
-                for value in re.split(r"\\s*[,;|•·]\\s*", technology_line)
+                for value in re.split(r"\s*[,;|•·]\s*", technology_line)
                 if value.strip(" \\t.;•◦")
             ]
             if (

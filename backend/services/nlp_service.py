@@ -615,6 +615,57 @@ def _recover_skills_from_source(source: str) -> list[dict]:
     return recovered
 
 
+def _skill_name_appears_in_text(text: str, skill_name: str) -> bool:
+    """Check that a named skill is actually present in its own evidence quote."""
+    name = (skill_name or "").strip()
+    if not name:
+        return False
+    escaped = re.escape(name)
+    escaped = re.sub(r"\\s+", r"\s+", escaped)
+    pattern = rf"(?<![A-Za-z0-9_+#.]){escaped}(?![A-Za-z0-9_+#.])"
+    return bool(re.search(pattern, text or "", re.IGNORECASE))
+
+
+def _repair_skill_evidence(source: str, skills: list[dict]) -> list[dict]:
+    """Attach each extracted skill to a source line that actually names it."""
+    source_lines = [line.strip() for line in source.splitlines() if line.strip()]
+    indexed_lines = []
+    section = None
+    for line in source_lines:
+        heading = _heading_kind(line)
+        if heading is not None:
+            section = heading
+        indexed_lines.append((line, section))
+
+    repaired = []
+    seen = set()
+    for raw in skills:
+        item = dict(raw)
+        name = (item.get("name") or "").strip()
+        key = _skill_name_key(name)
+        if not key or key in seen:
+            continue
+        evidence = (item.get("evidence") or "").strip()
+        if not _quote_is_in_source(evidence, source) or not _skill_name_appears_in_text(evidence, name):
+            matches = [
+                line for line, line_section in indexed_lines
+                if line_section in {"skills", "technical skills", "core skills"}
+                and _skill_name_appears_in_text(line, name)
+            ]
+            if not matches:
+                matches = [
+                    line for line, _ in indexed_lines
+                    if _skill_name_appears_in_text(line, name)
+                ]
+            if not matches:
+                continue
+            evidence = matches[0]
+        item["evidence"] = evidence
+        repaired.append(item)
+        seen.add(key)
+    return repaired
+
+
 def _heading_kind(line: str) -> str | None:
     normalized = re.sub(r"[^a-z ]", "", line.casefold()).strip()
     normalized = re.sub(r"\s+", " ", normalized)
@@ -829,6 +880,38 @@ def _recover_experience_from_source(source: str) -> list[dict]:
     return recovered
 
 
+def _deduplicate_responsibility_fragments(responsibilities: list[str]) -> list[str]:
+    """Drop short extracted fragments when a longer source-grounded duty contains them.
+
+    PDF extraction and LLM structuring can produce both a complete bullet and one or
+    more repeated fragments of that same bullet. Keep the most informative verbatim
+    source sentence rather than counting fragments as separate duties.
+    """
+    cleaned = []
+    for value in responsibilities:
+        if not isinstance(value, str):
+            continue
+        value = re.sub(r"\s+", " ", value).strip()
+        if value and _normalized_for_grounding(value):
+            cleaned.append(value)
+
+    kept = []
+    normalized = [_normalized_for_grounding(value) for value in cleaned]
+    for index, value in enumerate(cleaned):
+        key = normalized[index]
+        if any(
+            index != other_index
+            and key != other_key
+            and len(key) >= 12
+            and key in other_key
+            for other_index, other_key in enumerate(normalized)
+        ):
+            continue
+        if key not in {_normalized_for_grounding(item) for item in kept}:
+            kept.append(value)
+    return kept
+
+
 def _experience_date_key(value: str) -> str:
     """Normalize month abbreviations so LLM and source-parsed dates can be paired."""
     normalized = (value or "").casefold()
@@ -944,7 +1027,7 @@ def _merge_source_grounded_fallbacks(
             if key and key not in responsibility_keys and _quote_is_in_source(responsibility, source):
                 responsibilities.append(responsibility)
                 responsibility_keys.add(key)
-        existing["responsibilities"] = responsibilities
+        existing["responsibilities"] = _deduplicate_responsibility_fragments(responsibilities)
 
         # Use the parser's bounded, verbatim role block. It restores the employer
         # and responsibilities while stopping before the next role/section heading.
@@ -968,6 +1051,7 @@ def _recover_projects_from_source(source: str) -> list[dict]:
     recovered: list[dict] = []
     current: dict | None = None
     in_projects = False
+    consumed_technology_lines: set[int] = set()
 
     def finish_current() -> None:
         nonlocal current
@@ -989,11 +1073,34 @@ def _recover_projects_from_source(source: str) -> list[dict]:
         current = None
 
     for index, line in enumerate(lines):
+        if index in consumed_technology_lines:
+            continue
         heading = _heading_kind(line)
         if heading == "projects":
             finish_current()
             in_projects = True
             continue
+        if heading == "technologies" and in_projects and current is not None and index + 1 < len(lines):
+            # Some CVs place a plain "Technologies" subheading inside a project
+            # instead of using the more explicit "Tools Used: ..." label.
+            technology_line = lines[index + 1].strip()
+            technology_values = [
+                value.strip(" \\t.;•◦")
+                for value in re.split(r"\s*[,;|•·]\s*", technology_line)
+                if value.strip(" \\t.;•◦")
+            ]
+            if (
+                technology_values
+                and len(technology_values) <= 15
+                and len(technology_line) <= 180
+                and not _BULLET_PREFIX_PATTERN.match(technology_line)
+                and not re.search(r"[.!?]$", technology_line)
+            ):
+                current["lines"].extend([line, technology_line])
+                consumed_technology_lines.add(index + 1)
+                current["technologies"].extend(technology_values)
+                current["last_was_tools"] = True
+                continue
         if heading is not None and in_projects:
             finish_current()
             in_projects = False
@@ -1243,12 +1350,14 @@ def _extract_cv_cached(source: str) -> dict:
     assert isinstance(extraction, CVExtraction)
 
     # Ground every extracted list item in the actual CV text to reduce hallucinated facts.
-    skills = [
-        x.model_dump()
-        for x in extraction.skills
-        if _quote_is_in_source(x.evidence, source)
-        and _normalized_for_grounding(x.name) not in _BROAD_SKILL_LABELS
-    ]
+    skills = _repair_skill_evidence(
+        source,
+        [
+            x.model_dump()
+            for x in extraction.skills
+            if _normalized_for_grounding(x.name) not in _BROAD_SKILL_LABELS
+        ],
+    )
     experience = []
     for item in extraction.experience:
         if not _quote_is_in_source(item.evidence, source):
@@ -1512,14 +1621,21 @@ def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:
                 "quote": description_quote,
             })
 
+        project_lines = project_evidence.splitlines()
         technology_line = next(
             (
                 line.strip()
-                for line in project_evidence.splitlines()
+                for line in project_lines
                 if _PROJECT_TOOLS_PATTERN.match(_strip_bullet_prefix(line.strip()))
             ),
             "",
         )
+        if not technology_line:
+            for line_index, line in enumerate(project_lines[:-1]):
+                if _heading_kind(line.strip()) == "technologies":
+                    # Preserve the exact technology-list line as the evidence quote.
+                    technology_line = project_lines[line_index + 1].strip()
+                    break
         technologies = [
             value.strip()
             for value in project.get("technologies", []) or []
@@ -1773,6 +1889,49 @@ def _deterministic_requirement_assessment(
                 ),
             }
 
+    if "english" in requirement_text.casefold():
+        explicit_language_items = [
+            item for item in candidates
+            if item.get("type") == "language"
+            and _evidence_support_level(requirement.get("text", ""), item) == "direct"
+        ]
+        if explicit_language_items:
+            return {
+                "status": "partial",
+                "score": 60,
+                "evidence_ids": [item["id"] for item in explicit_language_items],
+                "explanation": (
+                    "The CV explicitly states an English proficiency level, but does not "
+                    "separately establish every spoken and written criterion requested."
+                ),
+            }
+
+    if "troubleshoot" in requirement_text.casefold() or "support environment" in requirement_text.casefold():
+        direct_support_items = [
+            item for item in candidates
+            if item.get("type") in {"experience", "experience_responsibility"}
+            and _evidence_support_level(requirement.get("text", ""), item) == "direct"
+        ]
+        if direct_support_items:
+            if _requirement_mentions_minimum_years(requirement_text):
+                return {
+                    "status": "partial",
+                    "score": 60,
+                    "evidence_ids": [item["id"] for item in direct_support_items],
+                    "explanation": (
+                        "The CV describes troubleshooting in a support role, but the evidence does not "
+                        "establish the minimum duration requested."
+                    ),
+                }
+            return {
+                "status": "matched",
+                "score": 80,
+                "evidence_ids": [item["id"] for item in direct_support_items],
+                "explanation": (
+                    "The CV describes troubleshooting tasks within a named IT support or service-desk role."
+                ),
+            }
+
     matching_technology_items = []
     matching_names: list[str] = []
     for item in candidates:
@@ -1893,8 +2052,15 @@ def _retrieve_evidence(job_requirements: list[dict], evidence_items: list[dict])
                 forced_indices.append(evidence_index)
 
         if "english" in requirement_text:
+            # Keep explicit language proficiency evidence; a generic writing sample
+            # must not replace a structured English declaration.
+            forced_indices = [
+                index for index, item in enumerate(evidence_items)
+                if item.get("type") == "language"
+                and _evidence_support_level(requirement.get("text", ""), item) == "direct"
+            ]
             if english_sample_index is not None:
-                forced_indices = [english_sample_index]
+                forced_indices.append(english_sample_index)
         elif (
             "speak" in requirement_text
             or "communication" in requirement_text
@@ -2128,12 +2294,18 @@ def _evidence_support_level(requirement_text: str, evidence_item: dict) -> str:
         return "none"
 
     if "troubleshoot" in requirement or "support environment" in requirement:
-        if has_any((
+        has_support_environment = has_any((
             r"\b(service desk|help desk|technical support|it support|user support|customer support)\b",
-            r"\b(incident management|logged incidents|support tickets|resolved (technical )?(issues|incidents|tickets))\b",
-            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is))\b.{0,80}\b(user|customer|client|support|incident|ticket)\b",
-        )):
+            r"\b(incident management|support tickets|support environment|helpdesk)\b",
+        ))
+        has_troubleshooting_task = has_any((
+            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is)|automated system diagnostics)\b",
+            r"\b(resolved|investigated)\b.{0,60}\b(technical )?(issues|incidents|tickets)\b",
+        ))
+        if has_support_environment and has_troubleshooting_task:
             return "direct"
+        if has_support_environment:
+            return "contextual"
         if has_any((
             r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is)|debug(ged|ging)?)\b",
             r"\b(fixed (software )?bugs?|resolved (software )?(issues?|bugs?|errors?)|"
@@ -2363,12 +2535,18 @@ def calculate_hybrid_match_score(
         )
 
         if rule_assessment is not None:
+            rule_evidence_ids = set(rule_assessment.get("evidence_ids", []))
+            llm_selected_ids = {item["id"] for item in llm_selected}
             should_override = (
                 requirement.get("category") == "education"
                 or assessment is None
                 or assessment.get("status") == "missing"
                 or not llm_selected
                 or (assessment.get("status") == "matched" and only_skill_or_project_evidence)
+                or (
+                    bool(rule_evidence_ids)
+                    and not rule_evidence_ids.intersection(llm_selected_ids)
+                )
             )
             if should_override:
                 assessment = rule_assessment
@@ -2433,6 +2611,28 @@ def calculate_hybrid_match_score(
             else:
                 status, score = "missing", 0
                 valid_evidence_ids = []
+
+            # A bare level such as "English — Fluent" does not separately prove
+            # both spoken and written ability when the job explicitly asks for both.
+            requirement_lower = requirement["text"].casefold()
+            explicit_quote = " ".join(
+                item.get("quote", "").casefold()
+                for item in candidates
+                if item.get("id") in valid_evidence_ids
+            )
+            asks_spoken_and_written = (
+                "spoken" in requirement_lower and "written" in requirement_lower
+            )
+            proves_both_modes = (
+                bool(re.search(r"\\b(spoken|speaking)\\b", explicit_quote))
+                and bool(re.search(r"\\b(written|writing)\\b", explicit_quote))
+            )
+            if status == "matched" and asks_spoken_and_written and not proves_both_modes:
+                status, score = "partial", 60
+                explanation = (
+                    "The CV states an English proficiency level, but does not separately "
+                    "confirm both spoken and written ability as requested."
+                )
         elif "english" in requirement["text"].casefold() and english_context is not None:
             valid_evidence_ids = [english_context["id"]]
             status, score = "partial", 50

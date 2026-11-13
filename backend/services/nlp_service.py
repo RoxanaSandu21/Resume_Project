@@ -780,8 +780,6 @@ def _recover_experience_from_source(source: str) -> list[dict]:
     section: str | None = None
 
     for index, line in enumerate(lines):
-        if index in consumed_technology_lines:
-            continue
         heading = _heading_kind(line)
         if heading is not None:
             section = heading
@@ -1075,6 +1073,8 @@ def _recover_projects_from_source(source: str) -> list[dict]:
         current = None
 
     for index, line in enumerate(lines):
+        if index in consumed_technology_lines:
+            continue
         heading = _heading_kind(line)
         if heading == "projects":
             finish_current()

@@ -780,6 +780,8 @@ def _recover_experience_from_source(source: str) -> list[dict]:
     section: str | None = None
 
     for index, line in enumerate(lines):
+        if index in consumed_technology_lines:
+            continue
         heading = _heading_kind(line)
         if heading is not None:
             section = heading
@@ -1051,6 +1053,7 @@ def _recover_projects_from_source(source: str) -> list[dict]:
     recovered: list[dict] = []
     current: dict | None = None
     in_projects = False
+    consumed_technology_lines: set[int] = set()
 
     def finish_current() -> None:
         nonlocal current
@@ -1094,6 +1097,7 @@ def _recover_projects_from_source(source: str) -> list[dict]:
                 and not re.search(r"[.!?]$", technology_line)
             ):
                 current["lines"].extend([line, technology_line])
+                consumed_technology_lines.add(index + 1)
                 current["technologies"].extend(technology_values)
                 current["last_was_tools"] = True
                 continue

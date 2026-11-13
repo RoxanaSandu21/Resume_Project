@@ -880,6 +880,38 @@ def _recover_experience_from_source(source: str) -> list[dict]:
     return recovered
 
 
+def _deduplicate_responsibility_fragments(responsibilities: list[str]) -> list[str]:
+    """Drop short extracted fragments when a longer source-grounded duty contains them.
+
+    PDF extraction and LLM structuring can produce both a complete bullet and one or
+    more repeated fragments of that same bullet. Keep the most informative verbatim
+    source sentence rather than counting fragments as separate duties.
+    """
+    cleaned = []
+    for value in responsibilities:
+        if not isinstance(value, str):
+            continue
+        value = re.sub(r"\\s+", " ", value).strip()
+        if value and _normalized_for_grounding(value):
+            cleaned.append(value)
+
+    kept = []
+    normalized = [_normalized_for_grounding(value) for value in cleaned]
+    for index, value in enumerate(cleaned):
+        key = normalized[index]
+        if any(
+            index != other_index
+            and key != other_key
+            and len(key) >= 12
+            and key in other_key
+            for other_index, other_key in enumerate(normalized)
+        ):
+            continue
+        if key not in {_normalized_for_grounding(item) for item in kept}:
+            kept.append(value)
+    return kept
+
+
 def _experience_date_key(value: str) -> str:
     """Normalize month abbreviations so LLM and source-parsed dates can be paired."""
     normalized = (value or "").casefold()
@@ -995,7 +1027,7 @@ def _merge_source_grounded_fallbacks(
             if key and key not in responsibility_keys and _quote_is_in_source(responsibility, source):
                 responsibilities.append(responsibility)
                 responsibility_keys.add(key)
-        existing["responsibilities"] = responsibilities
+        existing["responsibilities"] = _deduplicate_responsibility_fragments(responsibilities)
 
         # Use the parser's bounded, verbatim role block. It restores the employer
         # and responsibilities while stopping before the next role/section heading.
@@ -1045,6 +1077,26 @@ def _recover_projects_from_source(source: str) -> list[dict]:
             finish_current()
             in_projects = True
             continue
+        if heading == "technologies" and in_projects and current is not None and index + 1 < len(lines):
+            # Some CVs place a plain "Technologies" subheading inside a project
+            # instead of using the more explicit "Tools Used: ..." label.
+            technology_line = lines[index + 1].strip()
+            technology_values = [
+                value.strip(" \\t.;•◦")
+                for value in re.split(r"\\s*[,;|•·]\\s*", technology_line)
+                if value.strip(" \\t.;•◦")
+            ]
+            if (
+                technology_values
+                and len(technology_values) <= 15
+                and len(technology_line) <= 180
+                and not _BULLET_PREFIX_PATTERN.match(technology_line)
+                and not re.search(r"[.!?]$", technology_line)
+            ):
+                current["lines"].extend([line, technology_line])
+                current["technologies"].extend(technology_values)
+                current["last_was_tools"] = True
+                continue
         if heading is not None and in_projects:
             finish_current()
             in_projects = False

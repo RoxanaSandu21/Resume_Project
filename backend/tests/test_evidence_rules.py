@@ -1289,13 +1289,13 @@ class EvidenceRuleTests(unittest.TestCase):
 
     def test_project_parser_reads_plain_technologies_subheading(self):
         source = (
-            "Projects\\n"
-            "Distributed Systems using TouchGFX\\n"
-            "• Built a distributed embedded system communicating over CAN bus.\\n"
-            "Technologies\\n"
-            "CAN bus, TouchGFX, STM32CubeIDE, FreeRTOS\\n"
-            "MIPS Processor RTL Description and Verification\\n"
-            "• Designed and verified a processor using Verilog.\\n"
+            "Projects\n"
+            "Distributed Systems using TouchGFX\n"
+            "• Built a distributed embedded system communicating over CAN bus.\n"
+            "Technologies\n"
+            "CAN bus, TouchGFX, STM32CubeIDE, FreeRTOS\n"
+            "MIPS Processor RTL Description and Verification\n"
+            "• Designed and verified a processor using Verilog.\n"
         )
         projects = _recover_projects_from_source(source)
         first = projects[0]

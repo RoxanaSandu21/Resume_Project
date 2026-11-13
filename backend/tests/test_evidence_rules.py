@@ -25,6 +25,7 @@ from services.nlp_service import (  # noqa: E402
     _calculate_weighted_match_score,
     _chunk_raw_resume_text,
     _deterministic_requirement_assessment,
+    _deduplicate_responsibility_fragments,
     _requirement_mentions_minimum_years,
     _is_skill_or_project_only_evidence,
     _evidence_support_level,
@@ -1271,6 +1272,40 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertEqual(detail["status"], "matched")
         self.assertEqual(detail["score"], 80)
         self.assertEqual(detail["evidence"][0]["quote"], evidence["quote"])
+
+
+    def test_duplicate_responsibility_fragments_keep_the_complete_duty(self):
+        complete = (
+            "Executed automated system diagnostics and OS performance troubleshooting "
+            "using PowerShell scripts."
+        )
+        result = _deduplicate_responsibility_fragments([
+            "OS performance troubleshooting using PowerShell scripts.",
+            complete,
+            "Executed automated system diagnostics",
+            complete,
+        ])
+        self.assertEqual(result, [complete])
+
+    def test_project_parser_reads_plain_technologies_subheading(self):
+        source = (
+            "Projects\\n"
+            "Distributed Systems using TouchGFX\\n"
+            "• Built a distributed embedded system communicating over CAN bus.\\n"
+            "Technologies\\n"
+            "CAN bus, TouchGFX, STM32CubeIDE, FreeRTOS\\n"
+            "MIPS Processor RTL Description and Verification\\n"
+            "• Designed and verified a processor using Verilog.\\n"
+        )
+        projects = _recover_projects_from_source(source)
+        first = projects[0]
+        self.assertEqual(first["name"], "Distributed Systems using TouchGFX")
+        self.assertEqual(
+            first["technologies"],
+            ["CAN bus", "TouchGFX", "STM32CubeIDE", "FreeRTOS"],
+        )
+        self.assertTrue(_quote_is_in_source(first["evidence"], source))
+
 
 if __name__ == "__main__":
     unittest.main()

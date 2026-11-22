@@ -1045,14 +1045,53 @@ def _merge_source_grounded_fallbacks(
 
 
 
+
 _PROJECT_TOOLS_PATTERN = re.compile(
-    r"^(?:tools used|technologies|technology stack|tech stack)\s*:\s*(?P<items>.*)$",
+    r"^(?:tools\s*(?:used|&\s*technologies|and\s+technologies)?|technologies|technology\s+stack|tech\s+stack)\s*:\s*(?P<items>.*)$",
+    re.IGNORECASE,
+)
+_PROJECT_TECHNOLOGY_LABEL_PATTERN = re.compile(
+    r"\b(?:tools\s*(?:used|&\s*technologies|and\s+technologies)?|technologies|technology\s+stack|tech\s+stack)\s*:\s*",
     re.IGNORECASE,
 )
 
 
+def _split_project_technology_values(value: str) -> list[str]:
+    """Split an explicitly labeled technology list without guessing from prose."""
+    cleaned = re.sub(r"\s+", " ", (value or "")).strip().strip(" .;")
+    if not cleaned or len(cleaned) > 400:
+        return []
+    values = [
+        item.strip(" \t.;•◦")
+        for item in re.split(r"\s*[,;|•·]\s*", cleaned)
+        if item.strip(" \t.;•◦")
+    ]
+    values = [item for item in values if len(item) <= 80 and len(item.split()) <= 8]
+    return values[:20]
+
+
+def _project_technology_values_from_line(line: str) -> list[str]:
+    """Read technologies only when the source explicitly labels the list."""
+    content = _strip_bullet_prefix(line)
+    match = _PROJECT_TECHNOLOGY_LABEL_PATTERN.search(content)
+    if not match:
+        return []
+    return _split_project_technology_values(content[match.end():])
+
+
+def _find_project_technology_quote(project_evidence: str) -> str:
+    """Return the exact source line that explicitly lists project technologies."""
+    lines = (project_evidence or "").splitlines()
+    for index, line in enumerate(lines):
+        if _PROJECT_TECHNOLOGY_LABEL_PATTERN.search(_strip_bullet_prefix(line.strip())):
+            return line.strip()
+        if _heading_kind(line.strip()) == "technologies" and index + 1 < len(lines):
+            return lines[index + 1].strip()
+    return ""
+
+
 def _recover_projects_from_source(source: str) -> list[dict]:
-    """Recover named projects, exact descriptions, and tool lists from a Projects section."""
+    """Recover named projects, exact descriptions, and all explicitly labeled tools."""
     lines = [line.strip() for line in source.splitlines() if line.strip()]
     recovered: list[dict] = []
     current: dict | None = None
@@ -1081,20 +1120,22 @@ def _recover_projects_from_source(source: str) -> list[dict]:
     for index, line in enumerate(lines):
         if index in consumed_technology_lines:
             continue
+
         heading = _heading_kind(line)
         if heading == "projects":
             finish_current()
             in_projects = True
             continue
-        if heading == "technologies" and in_projects and current is not None and index + 1 < len(lines):
-            # Some CVs place a plain "Technologies" subheading inside a project
-            # instead of using the more explicit "Tools Used: ..." label.
+
+        if (
+            heading == "technologies"
+            and in_projects
+            and current is not None
+            and index + 1 < len(lines)
+        ):
+            # Some CVs use a standalone Technologies subheading followed by a list.
             technology_line = lines[index + 1].strip()
-            technology_values = [
-                value.strip(" \\t.;•◦")
-                for value in re.split(r"\s*[,;|•·]\s*", technology_line)
-                if value.strip(" \\t.;•◦")
-            ]
+            technology_values = _split_project_technology_values(technology_line)
             if (
                 technology_values
                 and len(technology_values) <= 15
@@ -1107,6 +1148,7 @@ def _recover_projects_from_source(source: str) -> list[dict]:
                 current["technologies"].extend(technology_values)
                 current["last_was_tools"] = True
                 continue
+
         if heading is not None and in_projects:
             finish_current()
             in_projects = False
@@ -1116,17 +1158,26 @@ def _recover_projects_from_source(source: str) -> list[dict]:
 
         content = _strip_bullet_prefix(line)
         is_bullet = bool(_BULLET_PREFIX_PATTERN.match(line))
-        tools_match = _PROJECT_TOOLS_PATTERN.match(content)
-        if is_bullet or tools_match:
+        technology_match = _PROJECT_TECHNOLOGY_LABEL_PATTERN.search(content)
+        technology_values = (
+            _split_project_technology_values(content[technology_match.end():])
+            if technology_match else []
+        )
+        is_tools_line = bool(_PROJECT_TOOLS_PATTERN.match(content))
+
+        if is_bullet or is_tools_line:
             if current is None:
                 continue
             current["lines"].append(line)
-            if tools_match:
-                current["technologies"].extend(
-                    value.strip(" \t.;•◦")
-                    for value in re.split(r"\s*,\s*", tools_match.group("items"))
-                    if value.strip(" \t.;•◦")
-                )
+
+            if technology_values:
+                current["technologies"].extend(technology_values)
+                # A bullet may contain a full result sentence followed by an inline
+                # "Technologies:" suffix. Preserve the complete source bullet as
+                # description while also indexing its explicitly labeled tools.
+                description_prefix = content[:technology_match.start()].strip() if technology_match else ""
+                if description_prefix:
+                    current["description"].append(content)
                 current["last_was_tools"] = True
             else:
                 if content:
@@ -1134,6 +1185,7 @@ def _recover_projects_from_source(source: str) -> list[dict]:
                 current["last_was_tools"] = False
             continue
 
+        # A short heading followed by a bullet starts the next project.
         next_is_bullet = (
             index + 1 < len(lines)
             and bool(_BULLET_PREFIX_PATTERN.match(lines[index + 1]))

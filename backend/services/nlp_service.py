@@ -398,13 +398,22 @@ def _suspected_truncated_project_titles(text: str) -> list[str]:
     return suspicious
 
 
-def _restore_truncated_project_titles_from_ocr(text: str, ocr_text: str) -> str:
+def _restore_truncated_project_titles_from_ocr(
+    text: str,
+    ocr_text: str,
+    suspected_fragments: list[str] | None = None,
+) -> str:
     """Replace a short lowercase title fragment only when OCR supplies one unique full line.
 
     The restored prefix must come from the PDF's OCR text; the function never
-    invents or completes a title from context alone.
+    invents or completes a title from context alone. Callers that scan a whole
+    multi-page document may pass the page's already-identified project fragments.
     """
-    suspicious = _suspected_truncated_project_titles(text)
+    suspicious = (
+        suspected_fragments
+        if suspected_fragments is not None
+        else _suspected_truncated_project_titles(text)
+    )
     if not suspicious or not ocr_text:
         return text
 
@@ -425,7 +434,7 @@ def _restore_truncated_project_titles_from_ocr(text: str, ocr_text: str) -> str:
             candidate_tokens = _normalized_for_grounding(candidate).split()
             if (
                 len(candidate_tokens) > len(suffix)
-                and candidate_tokens[-len(suffix):] == suffix
+                and candidate_tokens[1:1 + len(suffix)] == suffix
                 and candidate[:1].isupper()
                 and len(candidate) <= 110
                 and not re.search(r"[.!?;:]$", candidate)
@@ -482,6 +491,7 @@ def extract_text_from_pdf(pdf_path: str) -> str:
                     restored = _restore_truncated_project_titles_from_ocr(
                         page_text,
                         ocr_text,
+                        suspected_fragments=page_suspects,
                     )
                     if restored != page_text:
                         page_texts[page_index] = restored
@@ -1276,10 +1286,7 @@ def _recover_projects_from_source(source: str) -> list[dict]:
         content = _strip_bullet_prefix(line)
         is_bullet = bool(_BULLET_PREFIX_PATTERN.match(line))
         technology_match = _PROJECT_TECHNOLOGY_LABEL_PATTERN.search(content)
-        technology_values = (
-            _split_project_technology_values(content[technology_match.end():])
-            if technology_match else []
-        )
+        technology_values = _project_technology_values_from_line(content)
         is_tools_line = bool(_PROJECT_TOOLS_PATTERN.match(content))
 
         if is_bullet or is_tools_line:

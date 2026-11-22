@@ -370,6 +370,82 @@ def test_ollama_generation(timeout_seconds: float = 120.0) -> dict:
 # ---------- PDF text extraction ----------
 
 
+def _suspected_truncated_project_titles(text: str) -> list[str]:
+    """Find suspicious project-heading fragments without trying to guess their prefix."""
+    in_projects = False
+    suspicious = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        heading = _heading_kind(line)
+        if heading == "projects":
+            in_projects = True
+            continue
+        if heading is not None and heading != "technologies" and in_projects:
+            in_projects = False
+            continue
+        if not in_projects or not line or _BULLET_PREFIX_PATTERN.match(line):
+            continue
+
+        words = line.split()
+        if (
+            len(words) >= 2
+            and len(line) <= 110
+            and re.fullmatch(r"[a-z]{2,4}", words[0])
+            and words[1][:1].isupper()
+            and not re.search(r"[.!?;:]$", line)
+        ):
+            suspicious.append(line)
+    return suspicious
+
+
+def _restore_truncated_project_titles_from_ocr(text: str, ocr_text: str) -> str:
+    """Replace a short lowercase title fragment only when OCR supplies one unique full line.
+
+    The restored prefix must come from the PDF's OCR text; the function never
+    invents or completes a title from context alone.
+    """
+    suspicious = _suspected_truncated_project_titles(text)
+    if not suspicious or not ocr_text:
+        return text
+
+    ocr_lines = [
+        _strip_bullet_prefix(line.strip())
+        for line in ocr_text.splitlines()
+        if line.strip() and not _BULLET_PREFIX_PATTERN.match(line.strip())
+    ]
+    replacements = {}
+    for fragment in suspicious:
+        fragment_tokens = _normalized_for_grounding(fragment).split()
+        suffix = fragment_tokens[1:]
+        if not suffix:
+            continue
+
+        candidates = []
+        for candidate in ocr_lines:
+            candidate_tokens = _normalized_for_grounding(candidate).split()
+            if (
+                len(candidate_tokens) > len(suffix)
+                and candidate_tokens[-len(suffix):] == suffix
+                and candidate[:1].isupper()
+                and len(candidate) <= 110
+                and not re.search(r"[.!?;:]$", candidate)
+            ):
+                candidates.append(candidate.strip())
+
+        unique_candidates = list(dict.fromkeys(candidates))
+        if len(unique_candidates) == 1:
+            replacements[fragment] = unique_candidates[0]
+
+    if not replacements:
+        return text
+
+    restored_lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        restored_lines.append(replacements.get(stripped, line))
+    return "\n".join(restored_lines)
+
+
 def extract_text_from_pdf(pdf_path: str) -> str:
     """Extract selectable text from a PDF. Scanned/image-only PDFs need OCR."""
     try:
@@ -377,8 +453,49 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         with fitz.open(pdf_path) as document:
             if document.is_encrypted:
                 raise ValueError("The PDF is password-protected and cannot be read.")
-            for page in document:
-                chunks.append(page.get_text("text", sort=True))
+            pages = list(document)
+            page_texts = [page.get_text("text", sort=True) for page in pages]
+            combined_text = "\n".join(page_texts)
+            suspicious_titles = _suspected_truncated_project_titles(combined_text)
+
+            # OCR only pages that contain a likely truncated project heading.
+            # This keeps normal CV processing fast and uses OCR strictly as a
+            # source-recovery fallback, never as a title-generation mechanism.
+            for page_index, page_text in enumerate(page_texts):
+                page_suspects = [
+                    fragment for fragment in suspicious_titles
+                    if any(line.strip() == fragment for line in page_text.splitlines())
+                ]
+                if not page_suspects:
+                    continue
+                try:
+                    ocr_page = pages[page_index].get_textpage_ocr(
+                        language="eng",
+                        dpi=250,
+                        full=True,
+                    )
+                    ocr_text = pages[page_index].get_text(
+                        "text",
+                        textpage=ocr_page,
+                        sort=True,
+                    )
+                    restored = _restore_truncated_project_titles_from_ocr(
+                        page_text,
+                        ocr_text,
+                    )
+                    if restored != page_text:
+                        page_texts[page_index] = restored
+                        logger.info(
+                            "[PDF] Restored a truncated project heading from page %s OCR.",
+                            page_index + 1,
+                        )
+                except Exception as ocr_exc:
+                    logger.warning(
+                        "[PDF] Optional OCR fallback was unavailable for page %s: %s",
+                        page_index + 1,
+                        ocr_exc,
+                    )
+            chunks.extend(page_texts)
     except ValueError:
         raise
     except Exception as exc:

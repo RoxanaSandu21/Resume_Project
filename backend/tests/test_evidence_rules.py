@@ -14,6 +14,7 @@ if str(BACKEND_DIR) not in sys.path:
 from services.nlp_service import (  # noqa: E402
     _build_cv_evidence,
     CVExtraction,
+    CVExperience,
     CVSkill,
     MatchAssessmentOutput,
     RequirementAssessment,
@@ -1447,6 +1448,96 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertEqual(detail["status"], "partial")
         self.assertEqual(detail["score"], 60)
         self.assertEqual(detail["evidence"][0]["quote"], "English: fluent")
+
+
+
+    def test_cv_extraction_deduplicates_responsibilities_after_llm_and_source_merge(self):
+        source = (
+            "Professional Experience\n"
+            "Software Developer Jan 2024 – Present\n"
+            "Example Corp\n"
+            "- Designed and deployed full-stack backend services using Python, FastAPI, and AWS DynamoDB,\n"
+            "implementing high-throughput RESTful endpoints and core business logic\n"
+        )
+        full_duty = (
+            "Designed and deployed full-stack backend services using Python, FastAPI, and AWS DynamoDB, "
+            "implementing high-throughput RESTful endpoints and core business logic"
+        )
+        extraction = CVExtraction(
+            full_name="Example Candidate",
+            summary="",
+            experience=[
+                CVExperience(
+                    role="Software Developer",
+                    organization="Example Corp",
+                    dates="Jan 2024 – Present",
+                    responsibilities=[
+                        full_duty,
+                        "implementing high-throughput RESTful endpoints and core business logic",
+                    ],
+                    evidence="Software Developer Jan 2024 – Present\nExample Corp",
+                )
+            ],
+        )
+        _extract_cv_cached.cache_clear()
+        try:
+            with patch("services.nlp_service._ollama_extract", return_value=extraction):
+                result = extract_cv_information(source)
+            responsibilities = result["experience"][0]["responsibilities"]
+            self.assertEqual(responsibilities, [full_duty])
+        finally:
+            _extract_cv_cached.cache_clear()
+
+    def test_explicit_spoken_and_written_english_can_remain_matched(self):
+        requirement = {
+            "text": "Excellent understanding of English – spoken and written",
+            "source_text": "Excellent understanding of English – spoken and written",
+            "category": "language",
+            "priority": "required",
+        }
+        evidence = {
+            "id": "E1",
+            "type": "language",
+            "label": "English",
+            "text": "English: fluent, spoken and written",
+            "quote": "English: fluent, spoken and written",
+            "semantic_similarity": 0.82,
+        }
+        llm_assessment = {
+            0: {
+                "requirement_index": 0,
+                "status": "matched",
+                "score": 95,
+                "evidence_ids": ["E1"],
+                "explanation": "The resume explicitly states fluent spoken and written English.",
+            }
+        }
+        with ExitStack() as stack:
+            stack.enter_context(patch(
+                "services.nlp_service.extract_job_information",
+                return_value={"requirements": [requirement]},
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._build_cv_evidence",
+                return_value=[evidence],
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._retrieve_evidence",
+                return_value=([[evidence]], [0.82]),
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._llm_assess_requirements",
+                return_value=llm_assessment,
+            ))
+            result = calculate_hybrid_match_score(
+                "Excellent understanding of English spoken and written",
+                "English: fluent, spoken and written",
+                cv_data={},
+            )
+
+        detail = result["requirement_details"][0]
+        self.assertEqual(detail["status"], "matched")
+        self.assertEqual(detail["score"], 95)
 
 
 if __name__ == "__main__":

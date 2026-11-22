@@ -879,7 +879,7 @@ def _extract_responsibilities(
         starts_new_duty = bool(_RESPONSIBILITY_START_PATTERN.match(responsibility))
         previous_line_ends_sentence = bool(
             responsibilities
-            and re.search(r"[.!?]\\s*$", responsibilities[-1])
+            and re.search(r"[.!?]\s*$", responsibilities[-1])
         )
         if is_bullet or not responsibilities or (starts_new_duty and previous_line_ends_sentence):
             responsibilities.append(responsibility)

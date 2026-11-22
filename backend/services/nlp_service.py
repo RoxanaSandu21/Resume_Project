@@ -2793,7 +2793,9 @@ def calculate_hybrid_match_score(
 
             # A bare level such as "English — Fluent" does not separately prove
             # both spoken and written ability when the job explicitly asks for both.
-            requirement_lower = requirement["text"].casefold()
+            requirement_lower = (
+                f"{requirement.get('text', '')} {requirement.get('source_text', '')}"
+            ).casefold()
             explicit_quote = " ".join(
                 item.get("quote", "").casefold()
                 for item in candidates

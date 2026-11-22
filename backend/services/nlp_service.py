@@ -414,8 +414,34 @@ def _restore_truncated_project_titles_from_ocr(
         if suspected_fragments is not None
         else _suspected_truncated_project_titles(text)
     )
-    if not suspicious or not ocr_text:
+    if not ocr_text:
         return text
+
+    # Narrow fallback for short lowercase prefixes lost at the start of a
+    # project heading. OCR must provide one unique line whose remaining words
+    # exactly match the extracted suffix; no title is guessed.
+    if not suspicious:
+        in_projects = False
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            heading = _heading_kind(line)
+            if heading == "projects":
+                in_projects = True
+                continue
+            if heading is not None and heading != "technologies" and in_projects:
+                in_projects = False
+                continue
+            words = line.split()
+            if (
+                in_projects
+                and len(words) >= 2
+                and len(line) <= 110
+                and re.fullmatch(r"[a-z]{2,4}", words[0])
+                and words[1][:1].isupper()
+                and not _BULLET_PREFIX_PATTERN.match(line)
+                and not re.search(r"[.!?;:]$", line)
+            ):
+                suspicious.append(line)
 
     ocr_lines = [
         _strip_bullet_prefix(line.strip())
@@ -748,7 +774,7 @@ def _skill_name_appears_in_text(text: str, skill_name: str) -> bool:
     if not name:
         return False
     escaped = re.escape(name)
-    escaped = re.sub(r"\\s+", r"\s+", escaped)
+    escaped = re.sub(r"\\s+", lambda _: r"\s+", escaped)
     pattern = rf"(?<![A-Za-z0-9_+#.]){escaped}(?![A-Za-z0-9_+#.])"
     return bool(re.search(pattern, text or "", re.IGNORECASE))
 
@@ -1174,7 +1200,7 @@ def _merge_source_grounded_fallbacks(
 
 
 _PROJECT_TOOLS_PATTERN = re.compile(
-    r"^(?:tools\s*(?:used|&\s*technologies|and\s+technologies)?|technologies|technology\s+stack|tech\s+stack)\s*:\s*(?P<items>.*)$",
+    r"^(?:tools(?:\s*(?:used|&\s*technologies|and\s+technologies))?|technologies|technology\s+stack|tech\s+stack)\s*:\s*(?P<items>.*)$",
     re.IGNORECASE,
 )
 _PROJECT_TECHNOLOGY_LABEL_PATTERN = re.compile(

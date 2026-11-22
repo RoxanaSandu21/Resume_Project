@@ -752,7 +752,7 @@ def _extract_responsibilities(
         starts_new_duty = bool(_RESPONSIBILITY_START_PATTERN.match(responsibility))
         previous_line_ends_sentence = bool(
             responsibilities
-            and re.search(r"[.!?][\"')\\]]?$", responsibilities[-1])
+            and re.search(r"[.!?]\\s*$", responsibilities[-1])
         )
         if is_bullet or not responsibilities or (starts_new_duty and previous_line_ends_sentence):
             responsibilities.append(responsibility)
@@ -1690,21 +1690,7 @@ def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:
                 "quote": description_quote,
             })
 
-        project_lines = project_evidence.splitlines()
-        technology_line = next(
-            (
-                line.strip()
-                for line in project_lines
-                if _PROJECT_TOOLS_PATTERN.match(_strip_bullet_prefix(line.strip()))
-            ),
-            "",
-        )
-        if not technology_line:
-            for line_index, line in enumerate(project_lines[:-1]):
-                if _heading_kind(line.strip()) == "technologies":
-                    # Preserve the exact technology-list line as the evidence quote.
-                    technology_line = project_lines[line_index + 1].strip()
-                    break
+        technology_line = _find_project_technology_quote(project_evidence)
         technologies = [
             value.strip()
             for value in project.get("technologies", []) or []
@@ -1892,7 +1878,7 @@ def _is_skill_or_project_only_evidence(item: dict) -> bool:
     quote = item.get("quote") or ""
     for line in quote.splitlines():
         cleaned = _strip_bullet_prefix(line.strip())
-        if _SKILL_SECTION_PATTERN.match(cleaned) or _PROJECT_TOOLS_PATTERN.match(cleaned):
+        if _SKILL_SECTION_PATTERN.match(cleaned) or _PROJECT_TECHNOLOGY_LABEL_PATTERN.search(cleaned):
             return True
     return False
 

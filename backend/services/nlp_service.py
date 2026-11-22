@@ -750,11 +750,17 @@ def _extract_responsibilities(
 
         is_bullet = bool(_BULLET_PREFIX_PATTERN.match(raw_line))
         starts_new_duty = bool(_RESPONSIBILITY_START_PATTERN.match(responsibility))
-        if is_bullet or starts_new_duty or not responsibilities:
+        previous_line_ends_sentence = bool(
+            responsibilities
+            and re.search(r"[.!?][\"')\\]]?$", responsibilities[-1])
+        )
+        if is_bullet or not responsibilities or (starts_new_duty and previous_line_ends_sentence):
             responsibilities.append(responsibility)
         else:
-            # PDF extraction may wrap one bullet over multiple lines. Join its
-            # continuation instead of treating each visual line as a new duty.
+            # PDF extraction frequently wraps a single bullet onto another line.
+            # A lower-case participle such as "implementing" is usually a
+            # continuation, not a separate responsibility. Join it to the
+            # preceding bullet unless the previous line already ended a sentence.
             responsibilities[-1] = f"{responsibilities[-1]} {responsibility}".strip()
 
     deduplicated: list[str] = []
@@ -1372,6 +1378,17 @@ def _extract_cv_cached(source: str) -> dict:
         ]
         experience.append(structured_item)
     skills, experience = _merge_source_grounded_fallbacks(source, skills, experience)
+    # Deduplicate after all LLM/source merges, not only when a role was matched
+    # to a deterministic fallback. This catches repeated line-wrap fragments
+    # regardless of which extraction path produced the experience record.
+    for item in experience:
+        item["responsibilities"] = _deduplicate_responsibility_fragments([
+            value.strip()
+            for value in item.get("responsibilities", []) or []
+            if isinstance(value, str)
+            and value.strip()
+            and _quote_is_in_source(value, source)
+        ])
     education = _merge_source_grounded_education(
         source,
         [x.model_dump() for x in extraction.education],
@@ -2624,8 +2641,8 @@ def calculate_hybrid_match_score(
                 "spoken" in requirement_lower and "written" in requirement_lower
             )
             proves_both_modes = (
-                bool(re.search(r"\\b(spoken|speaking)\\b", explicit_quote))
-                and bool(re.search(r"\\b(written|writing)\\b", explicit_quote))
+                bool(re.search(r"\b(spoken|speaking)\b", explicit_quote))
+                and bool(re.search(r"\b(written|writing)\b", explicit_quote))
             )
             if status == "matched" and asks_spoken_and_written and not proves_both_modes:
                 status, score = "partial", 60

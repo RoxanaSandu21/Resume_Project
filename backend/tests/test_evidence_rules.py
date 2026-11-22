@@ -26,6 +26,7 @@ from services.nlp_service import (  # noqa: E402
     _chunk_raw_resume_text,
     _deterministic_requirement_assessment,
     _deduplicate_responsibility_fragments,
+    _restore_truncated_project_titles_from_ocr,
     _requirement_mentions_minimum_years,
     _is_skill_or_project_only_evidence,
     _evidence_support_level,
@@ -1315,6 +1316,137 @@ class EvidenceRuleTests(unittest.TestCase):
         )
         self.assertTrue(_quote_is_in_source(technology_evidence[0]["quote"], source))
         self.assertTrue(_quote_is_in_source(first["evidence"], source))
+
+
+
+    def test_wrapped_pdf_responsibility_lines_remain_one_duty(self):
+        source = (
+            "Professional Experience\n"
+            "Software Engineer (Contract), BinaryTint May 2025 – July 2025\n"
+            "- Designed and deployed full-stack backend services using Python, FastAPI, and AWS DynamoDB,\n"
+            "implementing high-throughput RESTful endpoints and core business logic\n"
+            "- Implemented event-driven notification handlers using Python and Boto3 for automated email\n"
+            "handling and scheduled user reminders\n"
+        )
+        experience = _recover_experience_from_source(source)
+        self.assertEqual(len(experience), 1)
+        self.assertEqual(len(experience[0]["responsibilities"]), 2)
+        self.assertIn(
+            "implementing high-throughput RESTful endpoints and core business logic",
+            experience[0]["responsibilities"][0],
+        )
+        self.assertIn(
+            "handling and scheduled user reminders",
+            experience[0]["responsibilities"][1],
+        )
+
+    def test_tudor_style_inline_project_technology_labels_are_extracted(self):
+        source = (
+            "Projects\n"
+            "Distributed Systems using TouchGFX\n"
+            "◦ Objective: Developed a graphical interface for a distributed embedded system.\n"
+            "◦ Key Results: Delivered a real-time monitoring demo. Technologies: TouchGFX, "
+            "STM32CubeMX/CubeIDE, FreeRTOS, CAN/CANopen, Quad-SPI/FMC.\n"
+            "MIPS Processor RTL Description and Verification\n"
+            "◦ Objective: Designed and verified a MIPS processor architecture.\n"
+            "◦ Tools & Technologies: Verilog, SystemVerilog, QuestaSim, ModelSim, Xilinx Vivado.\n"
+        )
+        projects = _recover_projects_from_source(source)
+        self.assertEqual(len(projects), 2)
+        self.assertEqual(
+            projects[0]["technologies"],
+            ["TouchGFX", "STM32CubeMX/CubeIDE", "FreeRTOS", "CAN/CANopen", "Quad-SPI/FMC"],
+        )
+        self.assertEqual(
+            projects[1]["technologies"],
+            ["Verilog", "SystemVerilog", "QuestaSim", "ModelSim", "Xilinx Vivado"],
+        )
+
+        evidence = _build_cv_evidence({"projects": projects}, source)
+        technology_items = [item for item in evidence if item["type"] == "project_technology"]
+        self.assertEqual(len(technology_items), 2)
+        self.assertIn("TouchGFX", technology_items[0]["skill_names"])
+        self.assertIn("QuestaSim", technology_items[1]["skill_names"])
+        self.assertTrue(all(_quote_is_in_source(item["quote"], source) for item in technology_items))
+
+    def test_ocr_restores_project_heading_only_from_a_unique_source_line(self):
+        extracted = (
+            "Projects\n"
+            "ery Systems using TouchGFX\n"
+            "◦ Objective: Developed a graphical interface.\n"
+        )
+        ocr = (
+            "Projects\n"
+            "Delivery Systems using TouchGFX\n"
+            "◦ Objective: Developed a graphical interface.\n"
+        )
+        restored = _restore_truncated_project_titles_from_ocr(extracted, ocr)
+        self.assertIn("Delivery Systems using TouchGFX", restored)
+        self.assertNotIn("ery Systems using TouchGFX", restored)
+
+    def test_ocr_does_not_guess_when_multiple_project_titles_match_fragment(self):
+        extracted = "Projects\nery Systems using TouchGFX\n"
+        ocr = (
+            "Projects\n"
+            "Delivery Systems using TouchGFX\n"
+            "Discovery Systems using TouchGFX\n"
+        )
+        self.assertEqual(
+            _restore_truncated_project_titles_from_ocr(extracted, ocr),
+            extracted,
+        )
+
+    def test_fluent_english_alone_is_partial_when_job_requires_spoken_and_written(self):
+        requirement = {
+            "text": "Excellent understanding of English – spoken and written",
+            "source_text": "Excellent understanding of English – spoken and written",
+            "category": "language",
+            "priority": "required",
+        }
+        evidence = {
+            "id": "E1",
+            "type": "language",
+            "label": "English",
+            "text": "English: fluent",
+            "quote": "English: fluent",
+            "semantic_similarity": 0.82,
+        }
+        llm_assessment = {
+            0: {
+                "requirement_index": 0,
+                "status": "matched",
+                "score": 95,
+                "evidence_ids": ["E1"],
+                "explanation": "Candidate explicitly states fluency in English.",
+            }
+        }
+        with ExitStack() as stack:
+            stack.enter_context(patch(
+                "services.nlp_service.extract_job_information",
+                return_value={"requirements": [requirement]},
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._build_cv_evidence",
+                return_value=[evidence],
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._retrieve_evidence",
+                return_value=([[evidence]], [0.82]),
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._llm_assess_requirements",
+                return_value=llm_assessment,
+            ))
+            result = calculate_hybrid_match_score(
+                "Excellent understanding of English spoken and written",
+                "English: fluent",
+                cv_data={},
+            )
+
+        detail = result["requirement_details"][0]
+        self.assertEqual(detail["status"], "partial")
+        self.assertEqual(detail["score"], 60)
+        self.assertEqual(detail["evidence"][0]["quote"], "English: fluent")
 
 
 if __name__ == "__main__":

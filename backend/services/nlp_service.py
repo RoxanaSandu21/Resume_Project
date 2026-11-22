@@ -1327,7 +1327,10 @@ def _recover_projects_from_source(source: str) -> list[dict]:
                 # description while also indexing its explicitly labeled tools.
                 description_prefix = content[:technology_match.start()].strip() if technology_match else ""
                 if description_prefix:
-                    current["description"].append(content)
+                    # Keep the narrative separate from the explicitly labeled
+                    # technology list. Both remain grounded in the same source line,
+                    # but they must produce distinct evidence quotes.
+                    current["description"].append(description_prefix)
                 current["last_was_tools"] = True
             else:
                 if content:

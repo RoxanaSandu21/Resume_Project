@@ -1322,9 +1322,9 @@ def _recover_projects_from_source(source: str) -> list[dict]:
 
             if technology_values:
                 current["technologies"].extend(technology_values)
-                # A bullet may contain a full result sentence followed by an inline
-                # "Technologies:" suffix. Preserve the complete source bullet as
-                # description while also indexing its explicitly labeled tools.
+                # A bullet may contain a result sentence followed by an inline
+                # "Technologies:" suffix. Keep the result as project description
+                # and index the explicitly labeled tools as separate evidence.
                 description_prefix = content[:technology_match.start()].strip() if technology_match else ""
                 if description_prefix:
                     # Keep the narrative separate from the explicitly labeled

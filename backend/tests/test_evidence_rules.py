@@ -1362,6 +1362,13 @@ class EvidenceRuleTests(unittest.TestCase):
             projects[1]["technologies"],
             ["Verilog", "SystemVerilog", "QuestaSim", "ModelSim", "Xilinx Vivado"],
         )
+        self.assertIn(
+            "Key Results: Delivered a real-time monitoring demo.",
+            projects[0]["description"],
+        )
+        self.assertFalse(
+            any("Technologies:" in description for description in projects[0]["description"])
+        )
 
         evidence = _build_cv_evidence({"projects": projects}, source)
         technology_items = [item for item in evidence if item["type"] == "project_technology"]
@@ -1383,7 +1390,7 @@ class EvidenceRuleTests(unittest.TestCase):
         )
         restored = _restore_truncated_project_titles_from_ocr(extracted, ocr)
         self.assertIn("Delivery Systems using TouchGFX", restored)
-        self.assertNotIn("ery Systems using TouchGFX", restored)
+        self.assertNotIn("ery Systems using TouchGFX", restored.splitlines())
 
     def test_ocr_does_not_guess_when_multiple_project_titles_match_fragment(self):
         extracted = "Projects\nery Systems using TouchGFX\n"

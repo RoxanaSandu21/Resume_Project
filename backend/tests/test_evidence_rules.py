@@ -28,6 +28,7 @@ from services.nlp_service import (  # noqa: E402
     _deterministic_requirement_assessment,
     _deduplicate_responsibility_fragments,
     _restore_truncated_project_titles_from_ocr,
+    _join_hyphenated_project_title_wraps,
     _requirement_mentions_minimum_years,
     _is_skill_or_project_only_evidence,
     _evidence_support_level,
@@ -1400,6 +1401,24 @@ class EvidenceRuleTests(unittest.TestCase):
                 for description in projects[0]["description"]
             )
         )
+
+    def test_hyphenated_project_title_wrapped_across_lines_is_rejoined(self):
+        source = (
+            "Projects\\n"
+            "Deliv-\\n"
+            "ery Systems using TouchGFX\\n"
+            "◦ Objective: Developed a graphical interface for a distributed embedded system.\\n"
+        )
+
+        normalized_source = _join_hyphenated_project_title_wraps(source)
+        self.assertIn("Delivery Systems using TouchGFX", normalized_source.splitlines())
+        self.assertNotIn("Deliv-", normalized_source)
+
+        projects = _recover_projects_from_source(normalized_source)
+        self.assertEqual(len(projects), 1)
+        self.assertEqual(projects[0]["name"], "Delivery Systems using TouchGFX")
+        self.assertTrue(_quote_is_in_source(projects[0]["evidence"], normalized_source))
+
 
     def test_ocr_restores_project_heading_only_from_a_unique_source_line(self):
         extracted = (

@@ -370,6 +370,81 @@ def test_ollama_generation(timeout_seconds: float = 120.0) -> dict:
 # ---------- PDF text extraction ----------
 
 
+def _join_hyphenated_project_title_wraps(text: str) -> str:
+    """Join a project title split across PDF lines at a hyphenated word.
+
+    This only joins a non-bullet line ending in a hyphen to a lowercase
+    continuation when the joined line is immediately followed by a project
+    description bullet. That keeps ordinary wrapped descriptions untouched.
+    """
+    lines = text.splitlines()
+    restored: list[str] = []
+    in_projects = False
+    index = 0
+
+    while index < len(lines):
+        raw_line = lines[index]
+        line = raw_line.strip()
+        heading = _heading_kind(line)
+
+        if heading == "projects":
+            in_projects = True
+            restored.append(raw_line)
+            index += 1
+            continue
+
+        if heading is not None and heading != "technologies" and in_projects:
+            in_projects = False
+
+        if in_projects and line and not _BULLET_PREFIX_PATTERN.match(line):
+            continuation_index = index + 1
+            while (
+                continuation_index < len(lines)
+                and not lines[continuation_index].strip()
+            ):
+                continuation_index += 1
+
+            following_index = continuation_index + 1
+            while (
+                following_index < len(lines)
+                and not lines[following_index].strip()
+            ):
+                following_index += 1
+
+            if continuation_index < len(lines) and following_index < len(lines):
+                continuation = lines[continuation_index].strip()
+                following = lines[following_index].strip()
+                ends_with_hyphen = bool(
+                    re.search(r"[A-Za-z]{2,}[-\u00ad\u2010\u2011]\s*$", line)
+                )
+                starts_with_lowercase = bool(re.match(r"^[a-z]", continuation))
+                continuation_is_not_heading = _heading_kind(continuation) is None
+                followed_by_project_bullet = bool(
+                    _BULLET_PREFIX_PATTERN.match(following)
+                )
+
+                if (
+                    ends_with_hyphen
+                    and starts_with_lowercase
+                    and continuation_is_not_heading
+                    and followed_by_project_bullet
+                    and not _BULLET_PREFIX_PATTERN.match(continuation)
+                ):
+                    joined = re.sub(
+                        r"[-\u00ad\u2010\u2011]\s*$",
+                        "",
+                        raw_line.rstrip(),
+                    ) + continuation
+                    restored.append(joined)
+                    index = continuation_index + 1
+                    continue
+
+        restored.append(raw_line)
+        index += 1
+
+    return "\n".join(restored)
+
+
 def _suspected_truncated_project_titles(text: str) -> list[str]:
     """Find suspicious project-heading fragments without trying to guess their prefix."""
     in_projects = False
@@ -489,7 +564,7 @@ def extract_text_from_pdf(pdf_path: str) -> str:
             if document.is_encrypted:
                 raise ValueError("The PDF is password-protected and cannot be read.")
             pages = list(document)
-            page_texts = [page.get_text("text", sort=True) for page in pages]
+            page_texts = [\n                _join_hyphenated_project_title_wraps(page.get_text("text", sort=True))\n                for page in pages\n            ]
             combined_text = "\n".join(page_texts)
             suspicious_titles = _suspected_truncated_project_titles(combined_text)
 

@@ -1315,6 +1315,24 @@ def _recover_projects_from_source(source: str) -> list[dict]:
         technology_values = _project_technology_values_from_line(content)
         is_tools_line = bool(_PROJECT_TOOLS_PATTERN.match(content))
 
+        # If a wrapped technology value ended in "/" or "-", consume the
+        # next plain-text line before it can be mistaken for a new project title.
+        if (
+            not is_bullet
+            and current is not None
+            and current["last_was_tools"]
+            and current["technologies"]
+            and re.search(r"[/\\-]$", current["technologies"][-1].strip())
+        ):
+            current["lines"].append(line)
+            continuation = content.strip(" \\t.;")
+            if continuation:
+                current["technologies"][-1] = (
+                    f"{current['technologies'][-1].rstrip()}{continuation}"
+                ).strip()
+            current["last_was_tools"] = True
+            continue
+
         if is_bullet or is_tools_line:
             if current is None:
                 continue
@@ -1384,24 +1402,6 @@ def _recover_projects_from_source(source: str) -> list[dict]:
                 ).strip()
             elif description_prefix:
                 current["description"].append(description_prefix)
-            current["last_was_tools"] = True
-            continue
-
-        # PDF text extraction can split one technology name across lines, e.g.
-        # "Quad-SPI/" followed by "FMC.". Join only when the previous value ends
-        # with an explicit continuation marker; do not merge ordinary prose.
-        if (
-            current["last_was_tools"]
-            and current["technologies"]
-            and re.search(r"[/\\-]$", current["technologies"][-1].strip())
-        ):
-            continuation = content.strip(" \\t.;")
-            if continuation:
-                current["technologies"][-1] = (
-                    f"{current['technologies'][-1].rstrip()} {continuation}"
-                    if not current["technologies"][-1].endswith("/")
-                    else f"{current['technologies'][-1].rstrip()}{continuation}"
-                ).strip()
             current["last_was_tools"] = True
             continue
 

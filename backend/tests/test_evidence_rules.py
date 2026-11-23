@@ -1404,10 +1404,10 @@ class EvidenceRuleTests(unittest.TestCase):
 
     def test_hyphenated_project_title_wrapped_across_lines_is_rejoined(self):
         source = (
-            "Projects\\n"
-            "Deliv-\\n"
-            "ery Systems using TouchGFX\\n"
-            "◦ Objective: Developed a graphical interface for a distributed embedded system.\\n"
+            "Projects\n"
+            "Deliv-\n"
+            "ery Systems using TouchGFX\n"
+            "◦ Objective: Developed a graphical interface for a distributed embedded system.\n"
         )
 
         normalized_source = _join_hyphenated_project_title_wraps(source)

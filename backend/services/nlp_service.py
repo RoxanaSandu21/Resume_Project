@@ -1369,7 +1369,42 @@ def _recover_projects_from_source(source: str) -> list[dict]:
             continue
 
         # A plain line following a bullet is usually a wrapped continuation.
+        # It may, however, contain an explicitly labeled technology suffix when
+        # PDF extraction wrapped the bullet before the word "Technologies:".
         current["lines"].append(line)
+        technology_match = _PROJECT_TECHNOLOGY_LABEL_PATTERN.search(content)
+        technology_values = _project_technology_values_from_line(content)
+
+        if technology_values:
+            current["technologies"].extend(technology_values)
+            description_prefix = content[:technology_match.start()].strip() if technology_match else ""
+            if description_prefix and current["description"]:
+                current["description"][-1] = (
+                    f"{current['description'][-1]} {description_prefix}"
+                ).strip()
+            elif description_prefix:
+                current["description"].append(description_prefix)
+            current["last_was_tools"] = True
+            continue
+
+        # PDF text extraction can split one technology name across lines, e.g.
+        # "Quad-SPI/" followed by "FMC.". Join only when the previous value ends
+        # with an explicit continuation marker; do not merge ordinary prose.
+        if (
+            current["last_was_tools"]
+            and current["technologies"]
+            and re.search(r"[/\\-]$", current["technologies"][-1].strip())
+        ):
+            continuation = content.strip(" \\t.;")
+            if continuation:
+                current["technologies"][-1] = (
+                    f"{current['technologies'][-1].rstrip()} {continuation}"
+                    if not current["technologies"][-1].endswith("/")
+                    else f"{current['technologies'][-1].rstrip()}{continuation}"
+                ).strip()
+            current["last_was_tools"] = True
+            continue
+
         if current["description"]:
             current["description"][-1] = f"{current['description'][-1]} {content}".strip()
         current["last_was_tools"] = False

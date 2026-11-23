@@ -564,7 +564,10 @@ def extract_text_from_pdf(pdf_path: str) -> str:
             if document.is_encrypted:
                 raise ValueError("The PDF is password-protected and cannot be read.")
             pages = list(document)
-            page_texts = [\n                _join_hyphenated_project_title_wraps(page.get_text("text", sort=True))\n                for page in pages\n            ]
+            page_texts = [
+                _join_hyphenated_project_title_wraps(page.get_text("text", sort=True))
+                for page in pages
+            ]
             combined_text = "\n".join(page_texts)
             suspicious_titles = _suspected_truncated_project_titles(combined_text)
 

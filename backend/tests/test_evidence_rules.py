@@ -1377,6 +1377,28 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertIn("QuestaSim", technology_items[1]["skill_names"])
         self.assertTrue(all(_quote_is_in_source(item["quote"], source) for item in technology_items))
 
+    def test_wrapped_inline_project_technology_list_is_recovered(self):
+        source = (
+            "Projects\\n"
+            "Distributed Systems using TouchGFX\\n"
+            "◦ Objective: Developed a graphical interface for a distributed embedded system.\\n"
+            "◦ Key Results: Delivered a real-time monitor-\\n"
+            "ing demo. Technologies: TouchGFX, STM32CubeMX/CubeIDE, FreeRTOS, CAN/CANopen, Quad-SPI/\\n"
+            "FMC.\\n"
+            "MIPS Processor RTL Description and Verification\\n"
+            "◦ Objective: Designed and verified a MIPS processor architecture.\\n"
+        )
+        projects = _recover_projects_from_source(source)
+        self.assertEqual(len(projects), 2)
+        self.assertEqual(
+            projects[0]["technologies"],
+            ["TouchGFX", "STM32CubeMX/CubeIDE", "FreeRTOS", "CAN/CANopen", "Quad-SPI/FMC"],
+        )
+        self.assertTrue(
+            any("Key Results: Delivered a real-time monitor- ing demo." in description
+                for description in projects[0]["description"])
+        )
+
     def test_ocr_restores_project_heading_only_from_a_unique_source_line(self):
         extracted = (
             "Projects\n"

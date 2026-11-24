@@ -370,6 +370,192 @@ def test_ollama_generation(timeout_seconds: float = 120.0) -> dict:
 # ---------- PDF text extraction ----------
 
 
+def _join_hyphenated_project_title_wraps(text: str) -> str:
+    """Join a project title split across PDF lines at a hyphenated word.
+
+    This only joins a non-bullet line ending in a hyphen to a lowercase
+    continuation when the joined line is immediately followed by a project
+    description bullet. That keeps ordinary wrapped descriptions untouched.
+    """
+    lines = text.splitlines()
+    restored: list[str] = []
+    in_projects = False
+    index = 0
+
+    while index < len(lines):
+        raw_line = lines[index]
+        line = raw_line.strip()
+        heading = _heading_kind(line)
+
+        if heading == "projects":
+            in_projects = True
+            restored.append(raw_line)
+            index += 1
+            continue
+
+        if heading is not None and heading != "technologies" and in_projects:
+            in_projects = False
+
+        if in_projects and line and not _BULLET_PREFIX_PATTERN.match(line):
+            continuation_index = index + 1
+            while (
+                continuation_index < len(lines)
+                and not lines[continuation_index].strip()
+            ):
+                continuation_index += 1
+
+            following_index = continuation_index + 1
+            while (
+                following_index < len(lines)
+                and not lines[following_index].strip()
+            ):
+                following_index += 1
+
+            if continuation_index < len(lines) and following_index < len(lines):
+                continuation = lines[continuation_index].strip()
+                following = lines[following_index].strip()
+                ends_with_hyphen = bool(
+                    re.search(r"[A-Za-z]{2,}[-\u00ad\u2010\u2011]\s*$", line)
+                )
+                starts_with_lowercase = bool(re.match(r"^[a-z]", continuation))
+                continuation_is_not_heading = _heading_kind(continuation) is None
+                followed_by_project_bullet = bool(
+                    _BULLET_PREFIX_PATTERN.match(following)
+                )
+
+                if (
+                    ends_with_hyphen
+                    and starts_with_lowercase
+                    and continuation_is_not_heading
+                    and followed_by_project_bullet
+                    and not _BULLET_PREFIX_PATTERN.match(continuation)
+                ):
+                    joined = re.sub(
+                        r"[-\u00ad\u2010\u2011]\s*$",
+                        "",
+                        raw_line.rstrip(),
+                    ) + continuation
+                    restored.append(joined)
+                    index = continuation_index + 1
+                    continue
+
+        restored.append(raw_line)
+        index += 1
+
+    return "\n".join(restored)
+
+
+def _suspected_truncated_project_titles(text: str) -> list[str]:
+    """Find suspicious project-heading fragments without trying to guess their prefix."""
+    in_projects = False
+    suspicious = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        heading = _heading_kind(line)
+        if heading == "projects":
+            in_projects = True
+            continue
+        if heading is not None and heading != "technologies" and in_projects:
+            in_projects = False
+            continue
+        if not in_projects or not line or _BULLET_PREFIX_PATTERN.match(line):
+            continue
+
+        words = line.split()
+        if (
+            len(words) >= 2
+            and len(line) <= 110
+            and re.fullmatch(r"[a-z]{2,4}", words[0])
+            and words[1][:1].isupper()
+            and not re.search(r"[.!?;:]$", line)
+        ):
+            suspicious.append(line)
+    return suspicious
+
+
+def _restore_truncated_project_titles_from_ocr(
+    text: str,
+    ocr_text: str,
+    suspected_fragments: list[str] | None = None,
+) -> str:
+    """Replace a short lowercase title fragment only when OCR supplies one unique full line.
+
+    The restored prefix must come from the PDF's OCR text; the function never
+    invents or completes a title from context alone. Callers that scan a whole
+    multi-page document may pass the page's already-identified project fragments.
+    """
+    suspicious = (
+        suspected_fragments
+        if suspected_fragments is not None
+        else _suspected_truncated_project_titles(text)
+    )
+    if not ocr_text:
+        return text
+
+    # Narrow fallback for short lowercase prefixes lost at the start of a
+    # project heading. OCR must provide one unique line whose remaining words
+    # exactly match the extracted suffix; no title is guessed.
+    if not suspicious:
+        in_projects = False
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            heading = _heading_kind(line)
+            if heading == "projects":
+                in_projects = True
+                continue
+            if heading is not None and heading != "technologies" and in_projects:
+                in_projects = False
+                continue
+            words = line.split()
+            if (
+                in_projects
+                and len(words) >= 2
+                and len(line) <= 110
+                and re.fullmatch(r"[a-z]{2,4}", words[0])
+                and words[1][:1].isupper()
+                and not _BULLET_PREFIX_PATTERN.match(line)
+                and not re.search(r"[.!?;:]$", line)
+            ):
+                suspicious.append(line)
+
+    ocr_lines = [
+        _strip_bullet_prefix(line.strip())
+        for line in ocr_text.splitlines()
+        if line.strip() and not _BULLET_PREFIX_PATTERN.match(line.strip())
+    ]
+    replacements = {}
+    for fragment in suspicious:
+        fragment_tokens = _normalized_for_grounding(fragment).split()
+        suffix = fragment_tokens[1:]
+        if not suffix:
+            continue
+
+        candidates = []
+        for candidate in ocr_lines:
+            candidate_tokens = _normalized_for_grounding(candidate).split()
+            if (
+                len(candidate_tokens) > len(suffix)
+                and candidate_tokens[1:1 + len(suffix)] == suffix
+                and candidate[:1].isupper()
+                and len(candidate) <= 110
+                and not re.search(r"[.!?;:]$", candidate)
+            ):
+                candidates.append(candidate.strip())
+
+        unique_candidates = list(dict.fromkeys(candidates))
+        if len(unique_candidates) == 1:
+            replacements[fragment] = unique_candidates[0]
+
+    if not replacements:
+        return text
+
+    restored_lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        restored_lines.append(replacements.get(stripped, line))
+    return "\n".join(restored_lines)
+
+
 def extract_text_from_pdf(pdf_path: str) -> str:
     """Extract selectable text from a PDF. Scanned/image-only PDFs need OCR."""
     try:
@@ -377,8 +563,53 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         with fitz.open(pdf_path) as document:
             if document.is_encrypted:
                 raise ValueError("The PDF is password-protected and cannot be read.")
-            for page in document:
-                chunks.append(page.get_text("text", sort=True))
+            pages = list(document)
+            page_texts = [
+                _join_hyphenated_project_title_wraps(page.get_text("text", sort=True))
+                for page in pages
+            ]
+            combined_text = "\n".join(page_texts)
+            suspicious_titles = _suspected_truncated_project_titles(combined_text)
+
+            # OCR only pages that contain a likely truncated project heading.
+            # This keeps normal CV processing fast and uses OCR strictly as a
+            # source-recovery fallback, never as a title-generation mechanism.
+            for page_index, page_text in enumerate(page_texts):
+                page_suspects = [
+                    fragment for fragment in suspicious_titles
+                    if any(line.strip() == fragment for line in page_text.splitlines())
+                ]
+                if not page_suspects:
+                    continue
+                try:
+                    ocr_page = pages[page_index].get_textpage_ocr(
+                        language="eng",
+                        dpi=250,
+                        full=True,
+                    )
+                    ocr_text = pages[page_index].get_text(
+                        "text",
+                        textpage=ocr_page,
+                        sort=True,
+                    )
+                    restored = _restore_truncated_project_titles_from_ocr(
+                        page_text,
+                        ocr_text,
+                        suspected_fragments=page_suspects,
+                    )
+                    if restored != page_text:
+                        page_texts[page_index] = restored
+                        logger.info(
+                            "[PDF] Restored a truncated project heading from page %s OCR.",
+                            page_index + 1,
+                        )
+                except Exception as ocr_exc:
+                    logger.warning(
+                        "[PDF] Optional OCR fallback was unavailable for page %s: %s",
+                        page_index + 1,
+                        ocr_exc,
+                    )
+            chunks.extend(page_texts)
     except ValueError:
         raise
     except Exception as exc:
@@ -615,6 +846,57 @@ def _recover_skills_from_source(source: str) -> list[dict]:
     return recovered
 
 
+def _skill_name_appears_in_text(text: str, skill_name: str) -> bool:
+    """Check that a named skill is actually present in its own evidence quote."""
+    name = (skill_name or "").strip()
+    if not name:
+        return False
+    escaped = re.escape(name)
+    escaped = re.sub(r"\\s+", lambda _: r"\s+", escaped)
+    pattern = rf"(?<![A-Za-z0-9_+#.]){escaped}(?![A-Za-z0-9_+#.])"
+    return bool(re.search(pattern, text or "", re.IGNORECASE))
+
+
+def _repair_skill_evidence(source: str, skills: list[dict]) -> list[dict]:
+    """Attach each extracted skill to a source line that actually names it."""
+    source_lines = [line.strip() for line in source.splitlines() if line.strip()]
+    indexed_lines = []
+    section = None
+    for line in source_lines:
+        heading = _heading_kind(line)
+        if heading is not None:
+            section = heading
+        indexed_lines.append((line, section))
+
+    repaired = []
+    seen = set()
+    for raw in skills:
+        item = dict(raw)
+        name = (item.get("name") or "").strip()
+        key = _skill_name_key(name)
+        if not key or key in seen:
+            continue
+        evidence = (item.get("evidence") or "").strip()
+        if not _quote_is_in_source(evidence, source) or not _skill_name_appears_in_text(evidence, name):
+            matches = [
+                line for line, line_section in indexed_lines
+                if line_section in {"skills", "technical skills", "core skills"}
+                and _skill_name_appears_in_text(line, name)
+            ]
+            if not matches:
+                matches = [
+                    line for line, _ in indexed_lines
+                    if _skill_name_appears_in_text(line, name)
+                ]
+            if not matches:
+                continue
+            evidence = matches[0]
+        item["evidence"] = evidence
+        repaired.append(item)
+        seen.add(key)
+    return repaired
+
+
 def _heading_kind(line: str) -> str | None:
     normalized = re.sub(r"[^a-z ]", "", line.casefold()).strip()
     normalized = re.sub(r"\s+", " ", normalized)
@@ -699,11 +981,17 @@ def _extract_responsibilities(
 
         is_bullet = bool(_BULLET_PREFIX_PATTERN.match(raw_line))
         starts_new_duty = bool(_RESPONSIBILITY_START_PATTERN.match(responsibility))
-        if is_bullet or starts_new_duty or not responsibilities:
+        previous_line_ends_sentence = bool(
+            responsibilities
+            and re.search(r"[.!?]\s*$", responsibilities[-1])
+        )
+        if is_bullet or not responsibilities or (starts_new_duty and previous_line_ends_sentence):
             responsibilities.append(responsibility)
         else:
-            # PDF extraction may wrap one bullet over multiple lines. Join its
-            # continuation instead of treating each visual line as a new duty.
+            # PDF extraction frequently wraps a single bullet onto another line.
+            # A lower-case participle such as "implementing" is usually a
+            # continuation, not a separate responsibility. Join it to the
+            # preceding bullet unless the previous line already ended a sentence.
             responsibilities[-1] = f"{responsibilities[-1]} {responsibility}".strip()
 
     deduplicated: list[str] = []
@@ -829,6 +1117,38 @@ def _recover_experience_from_source(source: str) -> list[dict]:
     return recovered
 
 
+def _deduplicate_responsibility_fragments(responsibilities: list[str]) -> list[str]:
+    """Drop short extracted fragments when a longer source-grounded duty contains them.
+
+    PDF extraction and LLM structuring can produce both a complete bullet and one or
+    more repeated fragments of that same bullet. Keep the most informative verbatim
+    source sentence rather than counting fragments as separate duties.
+    """
+    cleaned = []
+    for value in responsibilities:
+        if not isinstance(value, str):
+            continue
+        value = re.sub(r"\s+", " ", value).strip()
+        if value and _normalized_for_grounding(value):
+            cleaned.append(value)
+
+    kept = []
+    normalized = [_normalized_for_grounding(value) for value in cleaned]
+    for index, value in enumerate(cleaned):
+        key = normalized[index]
+        if any(
+            index != other_index
+            and key != other_key
+            and len(key) >= 12
+            and key in other_key
+            for other_index, other_key in enumerate(normalized)
+        ):
+            continue
+        if key not in {_normalized_for_grounding(item) for item in kept}:
+            kept.append(value)
+    return kept
+
+
 def _experience_date_key(value: str) -> str:
     """Normalize month abbreviations so LLM and source-parsed dates can be paired."""
     normalized = (value or "").casefold()
@@ -944,7 +1264,7 @@ def _merge_source_grounded_fallbacks(
             if key and key not in responsibility_keys and _quote_is_in_source(responsibility, source):
                 responsibilities.append(responsibility)
                 responsibility_keys.add(key)
-        existing["responsibilities"] = responsibilities
+        existing["responsibilities"] = _deduplicate_responsibility_fragments(responsibilities)
 
         # Use the parser's bounded, verbatim role block. It restores the employer
         # and responsibilities while stopping before the next role/section heading.
@@ -956,18 +1276,58 @@ def _merge_source_grounded_fallbacks(
 
 
 
+
 _PROJECT_TOOLS_PATTERN = re.compile(
-    r"^(?:tools used|technologies|technology stack|tech stack)\s*:\s*(?P<items>.*)$",
+    r"^(?:tools(?:\s*(?:used|&\s*technologies|and\s+technologies))?|technologies|technology\s+stack|tech\s+stack)\s*:\s*(?P<items>.*)$",
+    re.IGNORECASE,
+)
+_PROJECT_TECHNOLOGY_LABEL_PATTERN = re.compile(
+    r"\b(?:tools\s*(?:used|&\s*technologies|and\s+technologies)?|technologies|technology\s+stack|tech\s+stack)\s*:\s*",
     re.IGNORECASE,
 )
 
 
+def _split_project_technology_values(value: str) -> list[str]:
+    """Split an explicitly labeled technology list without guessing from prose."""
+    cleaned = re.sub(r"\s+", " ", (value or "")).strip().strip(" .;")
+    if not cleaned or len(cleaned) > 400:
+        return []
+    values = [
+        item.strip(" \t.;•◦")
+        for item in re.split(r"\s*[,;|•·]\s*", cleaned)
+        if item.strip(" \t.;•◦")
+    ]
+    values = [item for item in values if len(item) <= 80 and len(item.split()) <= 8]
+    return values[:20]
+
+
+def _project_technology_values_from_line(line: str) -> list[str]:
+    """Read technologies only when the source explicitly labels the list."""
+    content = _strip_bullet_prefix(line)
+    match = _PROJECT_TECHNOLOGY_LABEL_PATTERN.search(content)
+    if not match:
+        return []
+    return _split_project_technology_values(content[match.end():])
+
+
+def _find_project_technology_quote(project_evidence: str) -> str:
+    """Return the exact source line that explicitly lists project technologies."""
+    lines = (project_evidence or "").splitlines()
+    for index, line in enumerate(lines):
+        if _PROJECT_TECHNOLOGY_LABEL_PATTERN.search(_strip_bullet_prefix(line.strip())):
+            return line.strip()
+        if _heading_kind(line.strip()) == "technologies" and index + 1 < len(lines):
+            return lines[index + 1].strip()
+    return ""
+
+
 def _recover_projects_from_source(source: str) -> list[dict]:
-    """Recover named projects, exact descriptions, and tool lists from a Projects section."""
+    """Recover named projects, exact descriptions, and all explicitly labeled tools."""
     lines = [line.strip() for line in source.splitlines() if line.strip()]
     recovered: list[dict] = []
     current: dict | None = None
     in_projects = False
+    consumed_technology_lines: set[int] = set()
 
     def finish_current() -> None:
         nonlocal current
@@ -989,11 +1349,37 @@ def _recover_projects_from_source(source: str) -> list[dict]:
         current = None
 
     for index, line in enumerate(lines):
+        if index in consumed_technology_lines:
+            continue
+
         heading = _heading_kind(line)
         if heading == "projects":
             finish_current()
             in_projects = True
             continue
+
+        if (
+            heading == "technologies"
+            and in_projects
+            and current is not None
+            and index + 1 < len(lines)
+        ):
+            # Some CVs use a standalone Technologies subheading followed by a list.
+            technology_line = lines[index + 1].strip()
+            technology_values = _split_project_technology_values(technology_line)
+            if (
+                technology_values
+                and len(technology_values) <= 15
+                and len(technology_line) <= 180
+                and not _BULLET_PREFIX_PATTERN.match(technology_line)
+                and not re.search(r"[.!?]$", technology_line)
+            ):
+                current["lines"].extend([line, technology_line])
+                consumed_technology_lines.add(index + 1)
+                current["technologies"].extend(technology_values)
+                current["last_was_tools"] = True
+                continue
+
         if heading is not None and in_projects:
             finish_current()
             in_projects = False
@@ -1003,17 +1389,44 @@ def _recover_projects_from_source(source: str) -> list[dict]:
 
         content = _strip_bullet_prefix(line)
         is_bullet = bool(_BULLET_PREFIX_PATTERN.match(line))
-        tools_match = _PROJECT_TOOLS_PATTERN.match(content)
-        if is_bullet or tools_match:
+        technology_match = _PROJECT_TECHNOLOGY_LABEL_PATTERN.search(content)
+        technology_values = _project_technology_values_from_line(content)
+        is_tools_line = bool(_PROJECT_TOOLS_PATTERN.match(content))
+
+        # If a wrapped technology value ended in "/" or "-", consume the
+        # next plain-text line before it can be mistaken for a new project title.
+        if (
+            not is_bullet
+            and current is not None
+            and current["last_was_tools"]
+            and current["technologies"]
+            and re.search(r"[/\\-]$", current["technologies"][-1].strip())
+        ):
+            current["lines"].append(line)
+            continuation = content.strip(" \\t.;")
+            if continuation:
+                current["technologies"][-1] = (
+                    f"{current['technologies'][-1].rstrip()}{continuation}"
+                ).strip()
+            current["last_was_tools"] = True
+            continue
+
+        if is_bullet or is_tools_line:
             if current is None:
                 continue
             current["lines"].append(line)
-            if tools_match:
-                current["technologies"].extend(
-                    value.strip(" \t.;•◦")
-                    for value in re.split(r"\s*,\s*", tools_match.group("items"))
-                    if value.strip(" \t.;•◦")
-                )
+
+            if technology_values:
+                current["technologies"].extend(technology_values)
+                # A bullet may contain a result sentence followed by an inline
+                # "Technologies:" suffix. Keep the result as project description
+                # and index the explicitly labeled tools as separate evidence.
+                description_prefix = content[:technology_match.start()].strip() if technology_match else ""
+                if description_prefix:
+                    # Keep the narrative separate from the explicitly labeled
+                    # technology list. Both remain grounded in the same source line,
+                    # but they must produce distinct evidence quotes.
+                    current["description"].append(description_prefix)
                 current["last_was_tools"] = True
             else:
                 if content:
@@ -1021,6 +1434,7 @@ def _recover_projects_from_source(source: str) -> list[dict]:
                 current["last_was_tools"] = False
             continue
 
+        # A short heading followed by a bullet starts the next project.
         next_is_bullet = (
             index + 1 < len(lines)
             and bool(_BULLET_PREFIX_PATTERN.match(lines[index + 1]))
@@ -1051,7 +1465,24 @@ def _recover_projects_from_source(source: str) -> list[dict]:
             continue
 
         # A plain line following a bullet is usually a wrapped continuation.
+        # It may, however, contain an explicitly labeled technology suffix when
+        # PDF extraction wrapped the bullet before the word "Technologies:".
         current["lines"].append(line)
+        technology_match = _PROJECT_TECHNOLOGY_LABEL_PATTERN.search(content)
+        technology_values = _project_technology_values_from_line(content)
+
+        if technology_values:
+            current["technologies"].extend(technology_values)
+            description_prefix = content[:technology_match.start()].strip() if technology_match else ""
+            if description_prefix and current["description"]:
+                current["description"][-1] = (
+                    f"{current['description'][-1]} {description_prefix}"
+                ).strip()
+            elif description_prefix:
+                current["description"].append(description_prefix)
+            current["last_was_tools"] = True
+            continue
+
         if current["description"]:
             current["description"][-1] = f"{current['description'][-1]} {content}".strip()
         current["last_was_tools"] = False
@@ -1243,12 +1674,14 @@ def _extract_cv_cached(source: str) -> dict:
     assert isinstance(extraction, CVExtraction)
 
     # Ground every extracted list item in the actual CV text to reduce hallucinated facts.
-    skills = [
-        x.model_dump()
-        for x in extraction.skills
-        if _quote_is_in_source(x.evidence, source)
-        and _normalized_for_grounding(x.name) not in _BROAD_SKILL_LABELS
-    ]
+    skills = _repair_skill_evidence(
+        source,
+        [
+            x.model_dump()
+            for x in extraction.skills
+            if _normalized_for_grounding(x.name) not in _BROAD_SKILL_LABELS
+        ],
+    )
     experience = []
     for item in extraction.experience:
         if not _quote_is_in_source(item.evidence, source):
@@ -1263,6 +1696,17 @@ def _extract_cv_cached(source: str) -> dict:
         ]
         experience.append(structured_item)
     skills, experience = _merge_source_grounded_fallbacks(source, skills, experience)
+    # Deduplicate after all LLM/source merges, not only when a role was matched
+    # to a deterministic fallback. This catches repeated line-wrap fragments
+    # regardless of which extraction path produced the experience record.
+    for item in experience:
+        item["responsibilities"] = _deduplicate_responsibility_fragments([
+            value.strip()
+            for value in item.get("responsibilities", []) or []
+            if isinstance(value, str)
+            and value.strip()
+            and _quote_is_in_source(value, source)
+        ])
     education = _merge_source_grounded_education(
         source,
         [x.model_dump() for x in extraction.education],
@@ -1512,14 +1956,7 @@ def _build_cv_evidence(cv_data: dict, cv_text: str = "") -> list[dict]:
                 "quote": description_quote,
             })
 
-        technology_line = next(
-            (
-                line.strip()
-                for line in project_evidence.splitlines()
-                if _PROJECT_TOOLS_PATTERN.match(_strip_bullet_prefix(line.strip()))
-            ),
-            "",
-        )
+        technology_line = _find_project_technology_quote(project_evidence)
         technologies = [
             value.strip()
             for value in project.get("technologies", []) or []
@@ -1707,7 +2144,7 @@ def _is_skill_or_project_only_evidence(item: dict) -> bool:
     quote = item.get("quote") or ""
     for line in quote.splitlines():
         cleaned = _strip_bullet_prefix(line.strip())
-        if _SKILL_SECTION_PATTERN.match(cleaned) or _PROJECT_TOOLS_PATTERN.match(cleaned):
+        if _SKILL_SECTION_PATTERN.match(cleaned) or _PROJECT_TECHNOLOGY_LABEL_PATTERN.search(cleaned):
             return True
     return False
 
@@ -1770,6 +2207,49 @@ def _deterministic_requirement_assessment(
                 "explanation": (
                     "The CV shows relevant study, but the available education entry does not "
                     "establish a completed university qualification."
+                ),
+            }
+
+    if "english" in requirement_text.casefold():
+        explicit_language_items = [
+            item for item in candidates
+            if item.get("type") == "language"
+            and _evidence_support_level(requirement.get("text", ""), item) == "direct"
+        ]
+        if explicit_language_items:
+            return {
+                "status": "partial",
+                "score": 60,
+                "evidence_ids": [item["id"] for item in explicit_language_items],
+                "explanation": (
+                    "The CV explicitly states an English proficiency level, but does not "
+                    "separately establish every spoken and written criterion requested."
+                ),
+            }
+
+    if "troubleshoot" in requirement_text.casefold() or "support environment" in requirement_text.casefold():
+        direct_support_items = [
+            item for item in candidates
+            if item.get("type") in {"experience", "experience_responsibility"}
+            and _evidence_support_level(requirement.get("text", ""), item) == "direct"
+        ]
+        if direct_support_items:
+            if _requirement_mentions_minimum_years(requirement_text):
+                return {
+                    "status": "partial",
+                    "score": 60,
+                    "evidence_ids": [item["id"] for item in direct_support_items],
+                    "explanation": (
+                        "The CV describes troubleshooting in a support role, but the evidence does not "
+                        "establish the minimum duration requested."
+                    ),
+                }
+            return {
+                "status": "matched",
+                "score": 80,
+                "evidence_ids": [item["id"] for item in direct_support_items],
+                "explanation": (
+                    "The CV describes troubleshooting tasks within a named IT support or service-desk role."
                 ),
             }
 
@@ -1893,8 +2373,15 @@ def _retrieve_evidence(job_requirements: list[dict], evidence_items: list[dict])
                 forced_indices.append(evidence_index)
 
         if "english" in requirement_text:
+            # Keep explicit language proficiency evidence; a generic writing sample
+            # must not replace a structured English declaration.
+            forced_indices = [
+                index for index, item in enumerate(evidence_items)
+                if item.get("type") == "language"
+                and _evidence_support_level(requirement.get("text", ""), item) == "direct"
+            ]
             if english_sample_index is not None:
-                forced_indices = [english_sample_index]
+                forced_indices.append(english_sample_index)
         elif (
             "speak" in requirement_text
             or "communication" in requirement_text
@@ -2128,12 +2615,18 @@ def _evidence_support_level(requirement_text: str, evidence_item: dict) -> str:
         return "none"
 
     if "troubleshoot" in requirement or "support environment" in requirement:
-        if has_any((
+        has_support_environment = has_any((
             r"\b(service desk|help desk|technical support|it support|user support|customer support)\b",
-            r"\b(incident management|logged incidents|support tickets|resolved (technical )?(issues|incidents|tickets))\b",
-            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is))\b.{0,80}\b(user|customer|client|support|incident|ticket)\b",
-        )):
+            r"\b(incident management|support tickets|support environment|helpdesk)\b",
+        ))
+        has_troubleshooting_task = has_any((
+            r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is)|automated system diagnostics)\b",
+            r"\b(resolved|investigated)\b.{0,60}\b(technical )?(issues|incidents|tickets)\b",
+        ))
+        if has_support_environment and has_troubleshooting_task:
             return "direct"
+        if has_support_environment:
+            return "contextual"
         if has_any((
             r"\b(troubleshoot(ing|ed)?|diagnos(ed|ing|is)|debug(ged|ging)?)\b",
             r"\b(fixed (software )?bugs?|resolved (software )?(issues?|bugs?|errors?)|"
@@ -2363,12 +2856,18 @@ def calculate_hybrid_match_score(
         )
 
         if rule_assessment is not None:
+            rule_evidence_ids = set(rule_assessment.get("evidence_ids", []))
+            llm_selected_ids = {item["id"] for item in llm_selected}
             should_override = (
                 requirement.get("category") == "education"
                 or assessment is None
                 or assessment.get("status") == "missing"
                 or not llm_selected
                 or (assessment.get("status") == "matched" and only_skill_or_project_evidence)
+                or (
+                    bool(rule_evidence_ids)
+                    and not rule_evidence_ids.intersection(llm_selected_ids)
+                )
             )
             if should_override:
                 assessment = rule_assessment
@@ -2433,6 +2932,30 @@ def calculate_hybrid_match_score(
             else:
                 status, score = "missing", 0
                 valid_evidence_ids = []
+
+            # A bare level such as "English — Fluent" does not separately prove
+            # both spoken and written ability when the job explicitly asks for both.
+            requirement_lower = (
+                f"{requirement.get('text', '')} {requirement.get('source_text', '')}"
+            ).casefold()
+            explicit_quote = " ".join(
+                item.get("quote", "").casefold()
+                for item in candidates
+                if item.get("id") in valid_evidence_ids
+            )
+            asks_spoken_and_written = (
+                "spoken" in requirement_lower and "written" in requirement_lower
+            )
+            proves_both_modes = (
+                bool(re.search(r"\b(spoken|speaking)\b", explicit_quote))
+                and bool(re.search(r"\b(written|writing)\b", explicit_quote))
+            )
+            if status == "matched" and asks_spoken_and_written and not proves_both_modes:
+                status, score = "partial", 60
+                explanation = (
+                    "The CV states an English proficiency level, but does not separately "
+                    "confirm both spoken and written ability as requested."
+                )
         elif "english" in requirement["text"].casefold() and english_context is not None:
             valid_evidence_ids = [english_context["id"]]
             status, score = "partial", 50

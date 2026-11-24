@@ -7,6 +7,7 @@ A local research prototype built with FastAPI, Streamlit, PostgreSQL, Ollama, an
 - Python 3.12
 - PostgreSQL running locally, with an empty database created for this project
 - Ollama installed and running
+- Optional: Tesseract OCR installed and available on `PATH`. It is used only as a fallback when a project heading appears truncated in otherwise selectable PDF text; normal text extraction does not require it.
 - The local model downloaded:
   ```powershell
   ollama pull qwen2.5:7b-instruct
@@ -61,7 +62,7 @@ Keep both the backend and frontend terminals open. Open the Streamlit URL printe
 - **Database connection error:** check PostgreSQL, the database name, and `DATABASE_URL` in `backend/.env`.
 - **Ollama connection/model error:** start Ollama and run `ollama list` to confirm `qwen2.5:7b-instruct` is installed.
 - **Resume processing is slow:** first-time model downloads/loading and CPU inference can take several minutes. Watch the backend terminal; it logs the current processing stage.
-- **Scanned PDF:** PyMuPDF cannot extract selectable text from image-only PDFs. OCR must be added for those documents.
+- **Scanned PDF:** the optional OCR fallback only attempts to restore a suspiciously truncated project heading. Fully scanned/image-only resumes still need a complete OCR pass before they can be processed. If a project heading remains truncated and the backend logs that OCR is unavailable, install Tesseract and ensure `tesseract.exe` is on `PATH`.
 
 ## 5. Research limitations
 

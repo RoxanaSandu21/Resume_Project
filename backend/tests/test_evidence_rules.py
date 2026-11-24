@@ -3,6 +3,7 @@
 import json
 import sys
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ if str(BACKEND_DIR) not in sys.path:
 from services.nlp_service import (  # noqa: E402
     _build_cv_evidence,
     CVExtraction,
+    CVExperience,
     CVSkill,
     MatchAssessmentOutput,
     RequirementAssessment,
@@ -24,6 +26,9 @@ from services.nlp_service import (  # noqa: E402
     _calculate_weighted_match_score,
     _chunk_raw_resume_text,
     _deterministic_requirement_assessment,
+    _deduplicate_responsibility_fragments,
+    _restore_truncated_project_titles_from_ocr,
+    _join_hyphenated_project_title_wraps,
     _requirement_mentions_minimum_years,
     _is_skill_or_project_only_evidence,
     _evidence_support_level,
@@ -37,6 +42,7 @@ from services.nlp_service import (  # noqa: E402
     _merge_source_grounded_projects,
     _merge_source_grounded_education,
     _recover_skills_from_source,
+    _repair_skill_evidence,
     _retrieve_evidence,
     calculate_hybrid_match_score,
 )
@@ -1075,6 +1081,513 @@ class EvidenceRuleTests(unittest.TestCase):
             self.assertEqual([item["name"] for item in second["skills"]], ["Python"])
         finally:
             _extract_cv_cached.cache_clear()
+
+
+
+    def test_service_desk_troubleshooting_is_direct_evidence(self):
+        requirement = "Troubleshooting experience in a support environment"
+        item = {
+            "id": "E1",
+            "type": "experience_responsibility",
+            "label": "Service Desk Analyst — SCC | Responsibility",
+            "quote": "Automated system diagnostics and OS performance troubleshooting using PowerShell.",
+        }
+        self.assertEqual(_evidence_support_level(requirement, item), "direct")
+
+    def test_service_desk_title_without_a_troubleshooting_task_is_not_direct(self):
+        item = {
+            "id": "E1",
+            "type": "experience",
+            "label": "Service Desk Analyst — SCC",
+            "quote": "Service Desk Analyst June 2026 – Present",
+        }
+        self.assertEqual(
+            _evidence_support_level(
+                "Troubleshooting experience in a support environment",
+                item,
+            ),
+            "contextual",
+        )
+
+    def test_deterministic_assessment_recovers_explicit_service_desk_troubleshooting(self):
+        requirement = {
+            "text": "Troubleshooting experience in a support environment",
+            "source_text": "Troubleshooting experience in a support environment",
+            "category": "experience",
+        }
+        evidence = [{
+            "id": "E1",
+            "type": "experience_responsibility",
+            "label": "Service Desk Analyst — SCC | Responsibility",
+            "quote": "Automated system diagnostics and OS performance troubleshooting using PowerShell.",
+        }]
+        result = _deterministic_requirement_assessment(requirement, evidence)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "matched")
+        self.assertEqual(result["score"], 80)
+        self.assertEqual(result["evidence_ids"], ["E1"])
+
+    def test_support_troubleshooting_does_not_prove_requested_years_alone(self):
+        requirement = {
+            "text": "At least 2 years of troubleshooting experience in a support environment",
+            "source_text": "At least 2 years of troubleshooting experience in a support environment",
+            "category": "experience",
+        }
+        evidence = [{
+            "id": "E1",
+            "type": "experience_responsibility",
+            "label": "Service Desk Analyst — SCC | Responsibility",
+            "quote": "Automated system diagnostics and OS performance troubleshooting using PowerShell.",
+        }]
+        result = _deterministic_requirement_assessment(requirement, evidence)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["score"], 60)
+
+    def test_explicit_english_level_can_be_used_without_llm_selected_evidence(self):
+        requirement = {
+            "text": "Excellent understanding of English – spoken and written",
+            "source_text": "Excellent understanding of English – spoken and written",
+            "category": "language",
+        }
+        evidence = [{
+            "id": "E1",
+            "type": "language",
+            "label": "English",
+            "quote": "English — Fluent",
+        }]
+        result = _deterministic_requirement_assessment(requirement, evidence)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["score"], 60)
+        self.assertEqual(result["evidence_ids"], ["E1"])
+
+    def test_explicit_english_proficiency_is_not_hidden_by_cv_writing_sample(self):
+        import numpy as np
+
+        requirements = [{
+            "text": "Excellent understanding of English – spoken and written",
+            "source_text": "Excellent understanding of English – spoken and written",
+            "category": "language",
+        }]
+        evidence_items = [
+            {
+                "id": "E1",
+                "type": "language",
+                "label": "English",
+                "text": "English — Fluent",
+                "quote": "English — Fluent",
+            },
+            {
+                "id": "E2",
+                "type": "language_context",
+                "label": "English-language resume excerpt",
+                "text": "The candidate worked with customers and the team to support the service.",
+                "quote": "The candidate worked with customers and the team to support the service.",
+                "is_english_writing_sample": True,
+            },
+        ]
+
+        class ZeroSimilarityModel:
+            def encode(self, texts, **kwargs):
+                return np.tile(np.array([[1.0, 0.0]]), (len(texts), 1))
+
+        with patch("services.nlp_service._get_embedding_model", return_value=ZeroSimilarityModel()):
+            retrieved, _ = _retrieve_evidence(requirements, evidence_items)
+
+        retrieved_ids = [item["id"] for item in retrieved[0]]
+        self.assertIn("E1", retrieved_ids)
+        self.assertIn("E2", retrieved_ids)
+        self.assertLess(retrieved_ids.index("E1"), retrieved_ids.index("E2"))
+
+    def test_skill_evidence_is_repaired_to_the_line_that_names_the_skill(self):
+        source = (
+            "Professional Experience\n"
+            "Software Developer Jan 2024 – Present\n"
+            "• Implemented a Jenkins pipeline for automated builds.\n"
+            "Skills\n"
+            "Python, Docker, PostgreSQL\n"
+        )
+        skills = [
+            {"name": "Docker", "category": "tool", "evidence": "Implemented a Jenkins pipeline for automated builds."},
+            {"name": "PostgreSQL", "category": "tool", "evidence": "Implemented a Jenkins pipeline for automated builds."},
+        ]
+
+        repaired = _repair_skill_evidence(source, skills)
+        by_name = {item["name"]: item for item in repaired}
+        self.assertEqual(by_name["Docker"]["evidence"], "Python, Docker, PostgreSQL")
+        self.assertEqual(by_name["PostgreSQL"]["evidence"], "Python, Docker, PostgreSQL")
+        self.assertTrue(all(_quote_is_in_source(item["evidence"], source) for item in repaired))
+
+    def test_skill_evidence_does_not_confuse_c_with_cpp(self):
+        source = "Skills\nC++"
+        repaired = _repair_skill_evidence(
+            source,
+            [{"name": "C", "category": "technical_skill", "evidence": "Skills"}],
+        )
+        self.assertEqual(repaired, [])
+
+    def test_direct_support_evidence_overrides_llm_missing_assessment(self):
+        requirement = {
+            "text": "Troubleshooting experience in a support environment",
+            "source_text": "Troubleshooting experience in a support environment",
+            "category": "experience",
+            "priority": "required",
+        }
+        evidence = {
+            "id": "E1",
+            "type": "experience_responsibility",
+            "label": "Service Desk Analyst — SCC | Responsibility",
+            "text": "Service Desk Analyst. Automated system diagnostics and OS performance troubleshooting using PowerShell.",
+            "quote": "Automated system diagnostics and OS performance troubleshooting using PowerShell.",
+            "semantic_similarity": 0.12,
+        }
+        with ExitStack() as stack:
+            stack.enter_context(patch(
+                "services.nlp_service.extract_job_information",
+                return_value={"requirements": [requirement]},
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._build_cv_evidence",
+                return_value=[evidence],
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._retrieve_evidence",
+                return_value=([[evidence]], [0.12]),
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._llm_assess_requirements",
+                return_value={
+                    0: {
+                        "requirement_index": 0,
+                        "status": "missing",
+                        "score": 0,
+                        "evidence_ids": [],
+                        "explanation": "No evidence selected.",
+                    }
+                },
+            ))
+            result = calculate_hybrid_match_score(
+                "Troubleshooting experience in a support environment",
+                "Service Desk Analyst. Automated system diagnostics and OS performance troubleshooting using PowerShell.",
+                cv_data={},
+            )
+
+        detail = result["requirement_details"][0]
+        self.assertEqual(detail["status"], "matched")
+        self.assertEqual(detail["score"], 80)
+        self.assertEqual(detail["evidence"][0]["quote"], evidence["quote"])
+
+
+    def test_duplicate_responsibility_fragments_keep_the_complete_duty(self):
+        complete = (
+            "Executed automated system diagnostics and OS performance troubleshooting "
+            "using PowerShell scripts."
+        )
+        result = _deduplicate_responsibility_fragments([
+            "OS performance troubleshooting using PowerShell scripts.",
+            complete,
+            "Executed automated system diagnostics",
+            complete,
+        ])
+        self.assertEqual(result, [complete])
+
+    def test_project_parser_reads_plain_technologies_subheading(self):
+        source = (
+            "Projects\n"
+            "Distributed Systems using TouchGFX\n"
+            "• Built a distributed embedded system communicating over CAN bus.\n"
+            "Technologies\n"
+            "CAN bus, TouchGFX, STM32CubeIDE, FreeRTOS\n"
+            "MIPS Processor RTL Description and Verification\n"
+            "• Designed and verified a processor using Verilog.\n"
+        )
+        projects = _recover_projects_from_source(source)
+        first = projects[0]
+        self.assertEqual(first["name"], "Distributed Systems using TouchGFX")
+        self.assertEqual(
+            first["technologies"],
+            ["CAN bus", "TouchGFX", "STM32CubeIDE", "FreeRTOS"],
+        )
+        evidence = _build_cv_evidence({"projects": projects}, source)
+        technology_evidence = [
+            item for item in evidence if item["type"] == "project_technology"
+        ]
+        self.assertEqual(len(technology_evidence), 1)
+        self.assertEqual(
+            technology_evidence[0]["skill_names"],
+            ["CAN bus", "TouchGFX", "STM32CubeIDE", "FreeRTOS"],
+        )
+        self.assertTrue(_quote_is_in_source(technology_evidence[0]["quote"], source))
+        self.assertTrue(_quote_is_in_source(first["evidence"], source))
+
+
+
+    def test_wrapped_pdf_responsibility_lines_remain_one_duty(self):
+        source = (
+            "Professional Experience\n"
+            "Software Engineer (Contract), BinaryTint May 2025 – July 2025\n"
+            "- Designed and deployed full-stack backend services using Python, FastAPI, and AWS DynamoDB,\n"
+            "implementing high-throughput RESTful endpoints and core business logic\n"
+            "- Implemented event-driven notification handlers using Python and Boto3 for automated email\n"
+            "handling and scheduled user reminders\n"
+        )
+        experience = _recover_experience_from_source(source)
+        self.assertEqual(len(experience), 1)
+        self.assertEqual(len(experience[0]["responsibilities"]), 2)
+        self.assertIn(
+            "implementing high-throughput RESTful endpoints and core business logic",
+            experience[0]["responsibilities"][0],
+        )
+        self.assertIn(
+            "handling and scheduled user reminders",
+            experience[0]["responsibilities"][1],
+        )
+
+    def test_tudor_style_inline_project_technology_labels_are_extracted(self):
+        source = (
+            "Projects\n"
+            "Distributed Systems using TouchGFX\n"
+            "◦ Objective: Developed a graphical interface for a distributed embedded system.\n"
+            "◦ Key Results: Delivered a real-time monitoring demo. Technologies: TouchGFX, "
+            "STM32CubeMX/CubeIDE, FreeRTOS, CAN/CANopen, Quad-SPI/FMC.\n"
+            "MIPS Processor RTL Description and Verification\n"
+            "◦ Objective: Designed and verified a MIPS processor architecture.\n"
+            "◦ Tools & Technologies: Verilog, SystemVerilog, QuestaSim, ModelSim, Xilinx Vivado.\n"
+        )
+        projects = _recover_projects_from_source(source)
+        self.assertEqual(len(projects), 2)
+        self.assertEqual(
+            projects[0]["technologies"],
+            ["TouchGFX", "STM32CubeMX/CubeIDE", "FreeRTOS", "CAN/CANopen", "Quad-SPI/FMC"],
+        )
+        self.assertEqual(
+            projects[1]["technologies"],
+            ["Verilog", "SystemVerilog", "QuestaSim", "ModelSim", "Xilinx Vivado"],
+        )
+        self.assertIn(
+            "Key Results: Delivered a real-time monitoring demo.",
+            projects[0]["description"],
+        )
+        self.assertFalse(
+            any("Technologies:" in description for description in projects[0]["description"])
+        )
+
+        evidence = _build_cv_evidence({"projects": projects}, source)
+        technology_items = [item for item in evidence if item["type"] == "project_technology"]
+        self.assertEqual(len(technology_items), 2)
+        self.assertIn("TouchGFX", technology_items[0]["skill_names"])
+        self.assertIn("QuestaSim", technology_items[1]["skill_names"])
+        self.assertTrue(all(_quote_is_in_source(item["quote"], source) for item in technology_items))
+
+    def test_wrapped_inline_project_technology_list_is_recovered(self):
+        source = (
+            "Projects\n"
+            "Distributed Systems using TouchGFX\n"
+            "◦ Objective: Developed a graphical interface for a distributed embedded system.\n"
+            "◦ Key Results: Delivered a real-time monitor-\n"
+            "ing demo. Technologies: TouchGFX, STM32CubeMX/CubeIDE, FreeRTOS, CAN/CANopen, Quad-SPI/\n"
+            "FMC.\n"
+            "MIPS Processor RTL Description and Verification\n"
+            "◦ Objective: Designed and verified a MIPS processor architecture.\n"
+        )
+        projects = _recover_projects_from_source(source)
+        self.assertEqual(len(projects), 2)
+        self.assertEqual(
+            projects[0]["technologies"],
+            ["TouchGFX", "STM32CubeMX/CubeIDE", "FreeRTOS", "CAN/CANopen", "Quad-SPI/FMC"],
+        )
+        self.assertTrue(
+            any(
+                "Key Results: Delivered a real-time monitor- ing demo." in description
+                for description in projects[0]["description"]
+            )
+        )
+
+    def test_hyphenated_project_title_wrapped_across_lines_is_rejoined(self):
+        source = (
+            "Projects\n"
+            "Deliv-\n"
+            "ery Systems using TouchGFX\n"
+            "◦ Objective: Developed a graphical interface for a distributed embedded system.\n"
+        )
+
+        normalized_source = _join_hyphenated_project_title_wraps(source)
+        self.assertIn("Delivery Systems using TouchGFX", normalized_source.splitlines())
+        self.assertNotIn("Deliv-", normalized_source)
+
+        projects = _recover_projects_from_source(normalized_source)
+        self.assertEqual(len(projects), 1)
+        self.assertEqual(projects[0]["name"], "Delivery Systems using TouchGFX")
+        self.assertTrue(_quote_is_in_source(projects[0]["evidence"], normalized_source))
+
+
+    def test_ocr_restores_project_heading_only_from_a_unique_source_line(self):
+        extracted = (
+            "Projects\n"
+            "ery Systems using TouchGFX\n"
+            "◦ Objective: Developed a graphical interface.\n"
+        )
+        ocr = (
+            "Projects\n"
+            "Delivery Systems using TouchGFX\n"
+            "◦ Objective: Developed a graphical interface.\n"
+        )
+        restored = _restore_truncated_project_titles_from_ocr(extracted, ocr)
+        self.assertIn("Delivery Systems using TouchGFX", restored)
+        self.assertNotIn("ery Systems using TouchGFX", restored.splitlines())
+
+    def test_ocr_does_not_guess_when_multiple_project_titles_match_fragment(self):
+        extracted = "Projects\nery Systems using TouchGFX\n"
+        ocr = (
+            "Projects\n"
+            "Delivery Systems using TouchGFX\n"
+            "Discovery Systems using TouchGFX\n"
+        )
+        self.assertEqual(
+            _restore_truncated_project_titles_from_ocr(extracted, ocr),
+            extracted,
+        )
+
+    def test_fluent_english_alone_is_partial_when_job_requires_spoken_and_written(self):
+        requirement = {
+            "text": "Excellent understanding of English – spoken and written",
+            "source_text": "Excellent understanding of English – spoken and written",
+            "category": "language",
+            "priority": "required",
+        }
+        evidence = {
+            "id": "E1",
+            "type": "language",
+            "label": "English",
+            "text": "English: fluent",
+            "quote": "English: fluent",
+            "semantic_similarity": 0.82,
+        }
+        llm_assessment = {
+            0: {
+                "requirement_index": 0,
+                "status": "matched",
+                "score": 95,
+                "evidence_ids": ["E1"],
+                "explanation": "Candidate explicitly states fluency in English.",
+            }
+        }
+        with ExitStack() as stack:
+            stack.enter_context(patch(
+                "services.nlp_service.extract_job_information",
+                return_value={"requirements": [requirement]},
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._build_cv_evidence",
+                return_value=[evidence],
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._retrieve_evidence",
+                return_value=([[evidence]], [0.82]),
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._llm_assess_requirements",
+                return_value=llm_assessment,
+            ))
+            result = calculate_hybrid_match_score(
+                "Excellent understanding of English spoken and written",
+                "English: fluent",
+                cv_data={},
+            )
+
+        detail = result["requirement_details"][0]
+        self.assertEqual(detail["status"], "partial")
+        self.assertEqual(detail["score"], 60)
+        self.assertEqual(detail["evidence"][0]["quote"], "English: fluent")
+
+
+
+    def test_cv_extraction_deduplicates_responsibilities_after_llm_and_source_merge(self):
+        source = (
+            "Professional Experience\n"
+            "Software Developer Jan 2024 – Present\n"
+            "Example Corp\n"
+            "- Designed and deployed full-stack backend services using Python, FastAPI, and AWS DynamoDB,\n"
+            "implementing high-throughput RESTful endpoints and core business logic\n"
+        )
+        full_duty = (
+            "Designed and deployed full-stack backend services using Python, FastAPI, and AWS DynamoDB, "
+            "implementing high-throughput RESTful endpoints and core business logic"
+        )
+        extraction = CVExtraction(
+            full_name="Example Candidate",
+            summary="",
+            experience=[
+                CVExperience(
+                    role="Software Developer",
+                    organization="Example Corp",
+                    dates="Jan 2024 – Present",
+                    responsibilities=[
+                        full_duty,
+                        "implementing high-throughput RESTful endpoints and core business logic",
+                    ],
+                    evidence="Software Developer Jan 2024 – Present\nExample Corp",
+                )
+            ],
+        )
+        _extract_cv_cached.cache_clear()
+        try:
+            with patch("services.nlp_service._ollama_extract", return_value=extraction):
+                result = extract_cv_information(source)
+            responsibilities = result["experience"][0]["responsibilities"]
+            self.assertEqual(responsibilities, [full_duty])
+        finally:
+            _extract_cv_cached.cache_clear()
+
+    def test_explicit_spoken_and_written_english_can_remain_matched(self):
+        requirement = {
+            "text": "Excellent understanding of English – spoken and written",
+            "source_text": "Excellent understanding of English – spoken and written",
+            "category": "language",
+            "priority": "required",
+        }
+        evidence = {
+            "id": "E1",
+            "type": "language",
+            "label": "English",
+            "text": "English: fluent, spoken and written",
+            "quote": "English: fluent, spoken and written",
+            "semantic_similarity": 0.82,
+        }
+        llm_assessment = {
+            0: {
+                "requirement_index": 0,
+                "status": "matched",
+                "score": 95,
+                "evidence_ids": ["E1"],
+                "explanation": "The resume explicitly states fluent spoken and written English.",
+            }
+        }
+        with ExitStack() as stack:
+            stack.enter_context(patch(
+                "services.nlp_service.extract_job_information",
+                return_value={"requirements": [requirement]},
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._build_cv_evidence",
+                return_value=[evidence],
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._retrieve_evidence",
+                return_value=([[evidence]], [0.82]),
+            ))
+            stack.enter_context(patch(
+                "services.nlp_service._llm_assess_requirements",
+                return_value=llm_assessment,
+            ))
+            result = calculate_hybrid_match_score(
+                "Excellent understanding of English spoken and written",
+                "English: fluent, spoken and written",
+                cv_data={},
+            )
+
+        detail = result["requirement_details"][0]
+        self.assertEqual(detail["status"], "matched")
+        self.assertEqual(detail["score"], 95)
 
 
 if __name__ == "__main__":
